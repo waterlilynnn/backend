@@ -22,7 +22,7 @@ from app.models.clearance import Clearance
 from app.models.inspection import Inspection
 from app.models.audit_log import AuditLog
 
-from app.routers import admin, clearance, business, inspections, bulk
+from app.routers import admin, clearance, business, inspections, bulk, audit
 from app.services.auth import authenticate_user, change_password
 from app.utils.constants import BARANGAYS, BUSINESS_LINES, HAULER_TYPES, PSIC_CATEGORIES
 
@@ -44,6 +44,7 @@ app.include_router(clearance.router)
 app.include_router(business.router)
 app.include_router(inspections.router)
 app.include_router(bulk.router)
+app.include_router(audit.router)
 
 # CORS middleware
 app.add_middleware(
