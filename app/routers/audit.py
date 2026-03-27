@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.models.business_record import BusinessRecord
 from app.models.clearance import Clearance
+from app.models.inspection import Inspection
 
 router = APIRouter(
     prefix="/audit",
@@ -17,7 +18,6 @@ router = APIRouter(
 )
 
 def format_details(details_json, action, entity_type, entity_id, db):
-    """Convert JSON details to readable plain text"""
     if not details_json:
         return "—"
     
@@ -28,24 +28,20 @@ def format_details(details_json, action, entity_type, entity_id, db):
             details = details_json
         
         if entity_type == "USER":
-            # Get user details
             user = db.query(User).filter(User.id == entity_id).first()
             user_display = f"{user.full_name} ({user.email})" if user else f"User ID: {entity_id}"
             
             if action == "CREATE":
                 return f"CREATED staff account: {user_display}"
-            
             elif action == "TOGGLE":
                 is_active = details.get('is_active', False)
                 status = 'ACTIVATED' if is_active else 'DEACTIVATED'
                 return f"{status} staff account: {user_display}"
-            
             elif action == "DELETE":
                 email = details.get('email', 'Unknown')
                 return f"DELETED staff account: {email}"
         
         elif entity_type == "BUSINESS":
-            # Get business details
             business = db.query(BusinessRecord).filter(BusinessRecord.id == entity_id).first()
             business_name = business.establishment_name if business else f"Business ID: {entity_id}"
             
@@ -60,15 +56,11 @@ def format_details(details_json, action, entity_type, entity_id, db):
                 if changes:
                     change_descs = []
                     for field, vals in changes.items():
-                        field_name = field.replace('_', ' ').title()
                         old_val = vals.get('old', '—')
                         new_val = vals.get('new', '—')
-                        
-                        # Format specific fields
                         if field == 'has_violation':
-                            old_val = 'Yes' if old_val == 'True' or old_val is True else 'No'
-                            new_val = 'Yes' if new_val == 'True' or new_val is True else 'No'
-                        
+                            old_val = 'Yes' if old_val in ('True', True) else 'No'
+                            new_val = 'Yes' if new_val in ('True', True) else 'No'
                         if field == 'establishment_name':
                             change_descs.append(f"name → \"{new_val}\" (from \"{old_val}\")")
                         elif field == 'business_line':
@@ -80,8 +72,7 @@ def format_details(details_json, action, entity_type, entity_id, db):
                         elif field == 'has_violation':
                             change_descs.append(f"violation status → {new_val} (from {old_val})")
                         else:
-                            change_descs.append(f"{field_name} → {new_val} (from {old_val})")
-                    
+                            change_descs.append(f"{field.replace('_', ' ').title()} → {new_val} (from {old_val})")
                     if change_descs:
                         return f"EDITED business \"{business_name}\": {', '.join(change_descs)}"
                 return f"EDITED business \"{business_name}\""
@@ -93,9 +84,14 @@ def format_details(details_json, action, entity_type, entity_id, db):
             elif action == "INSPECT":
                 status = details.get('status', 'Unknown')
                 return f"INSPECTED business \"{business_name}\": {status}"
-        
+            
+            elif action == "RESOLVE":
+                inspection_id = details.get('inspection_id', '—')
+                resolved_remarks = details.get('resolved_remarks') or None
+                remarks_text = f" · Remarks: {resolved_remarks}" if resolved_remarks and resolved_remarks != 'None' else ""
+                return f"RESOLVED violation for \"{business_name}\" (Inspection #{inspection_id}){remarks_text}"
+            
         elif entity_type == "CLEARANCE":
-            # Get clearance and business details
             clearance = db.query(Clearance).filter(Clearance.id == entity_id).first()
             if clearance:
                 business = db.query(BusinessRecord).filter(BusinessRecord.id == clearance.business_record_id).first()
@@ -107,14 +103,30 @@ def format_details(details_json, action, entity_type, entity_id, db):
             
             if action == "GENERATE":
                 return f"GENERATED clearance {control} for \"{business_name}\""
-            
             elif action == "PRINT":
                 return f"PRINTED clearance {control} for \"{business_name}\""
-            
             elif action == "ISSUE":
                 return f"ISSUED clearance {control} to \"{business_name}\""
         
-        # Fallback
+        elif entity_type == "REPORT":
+            report_type = details.get("report_type", "unknown").capitalize()
+            count = details.get("record_count", 0)
+            filters = details.get("filters", {})
+            active_filters = [f"{k}: {v}" for k, v in filters.items() if v and v != "all"]
+            filter_text = f" [{', '.join(active_filters)}]" if active_filters else ""
+            return f"EXPORTED {report_type} Report PDF — {count} record{'s' if count != 1 else ''}{filter_text}"
+        
+        elif entity_type == "REQUIREMENT_TEMPLATE":
+            if action == "CREATE":
+                return f"Added requirement: {details.get('label', 'Unknown')}"
+            elif action == "UPDATE":
+                return f"Updated requirement: {details.get('label', 'Unknown')}"
+            elif action == "DELETE":
+                return f"Removed requirement: {details.get('label', 'Unknown')}"
+        
+        elif entity_type == "SETTING":
+            return f"Updated system setting: {details.get('key', 'Unknown')}"
+        
         if isinstance(details, dict):
             return f"{action}: {', '.join([f'{k}: {v}' for k, v in details.items()])}"
         return f"{action}: {str(details)}"
@@ -152,9 +164,7 @@ def get_audit_logs(
     
     result_items = []
     for log in items:
-        # Format details
         formatted_details = format_details(log.details, log.action, log.entity_type, log.entity_id, db)
-        
         result_items.append({
             "id": log.id,
             "user": log.user.full_name if log.user else "System",

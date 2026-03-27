@@ -92,3 +92,10 @@ class BusinessRecord(Base):
     
     # Inspections
     inspections = relationship("Inspection", back_populates="business_record", cascade="all, delete-orphan")
+    
+    # Requirements
+    requirement_submissions = relationship(
+        "RequirementSubmission",
+        back_populates="business",
+        cascade="all, delete-orphan"
+    )     

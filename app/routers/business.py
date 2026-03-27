@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.security import staff_only, admin_only, log_audit
 from app.models.user import User
 from app.models.business_record import BusinessRecord, HaulerType
+from app.models.setting import SystemSetting
 from app.schemas.business import (
     BusinessCreate, BusinessUpdate, BusinessResponse,
     BusinessSearchResponse
@@ -37,21 +38,58 @@ def generate_control_number(db: Session, application_type: str, existing_busines
     return f"EMC-{year}-{month}-{new_seq:04d}"
 
 
+def check_duplicate_business(db: Session, establishment_name: str, location: str, exclude_id: int = None):
+    """Check if a business with same name and location already exists"""
+    query = db.query(BusinessRecord).filter(
+        BusinessRecord.establishment_name.ilike(establishment_name),
+        BusinessRecord.location == location
+    )
+    if exclude_id:
+        query = query.filter(BusinessRecord.id != exclude_id)
+    return query.first()
+
+
 @router.post("/", response_model=BusinessResponse, status_code=status.HTTP_201_CREATED)
 def create_business_record(
     data: BusinessCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
+    """Create a new business record with validation"""
+    
+    # Check for duplicate business
+    duplicate = check_duplicate_business(db, data.establishment_name, data.location)
+    if duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Business '{data.establishment_name}' already exists in {data.location}"
+        )
+    
+    # Validate BIN if provided
+    if data.bin_number and data.bin_number.strip():
+        from app.utils.bin_validator import validate_bin_number
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
+        formats_json = setting.value if setting else None
+        is_valid, error_msg = validate_bin_number(data.bin_number, formats_json)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg or "Invalid BIN number format"
+            )
+    
+    # Check for existing business (for renewal)
     existing = None
     if data.bin_number:
         existing = db.query(BusinessRecord).filter(
             BusinessRecord.bin_number == data.bin_number
         ).first()
-
+    
+    # Generate control number
     control_number = generate_control_number(db, data.application_type, existing)
+    
+    # Set previous record ID for renewal
     previous_record_id = existing.id if existing and data.application_type == "RENEWAL" else None
-
+    
     business = BusinessRecord(
         bin_number=data.bin_number,
         establishment_name=data.establishment_name,
@@ -73,20 +111,21 @@ def create_business_record(
         validity=datetime(datetime.now().year, 12, 31).date(),
         previous_record_id=previous_record_id
     )
-
+    
     db.add(business)
     db.commit()
     db.refresh(business)
-
+    
     log_audit(
-        db, current_user.id, "CREATE", "BUSINESS",
+        db, current_user.id, "CREATE", "BUSINESS", 
         business.id, {
             "name": business.establishment_name,
             "control_number": business.control_number,
-            "type": business.application_type
+            "type": business.application_type,
+            "location": business.location
         }
     )
-
+    
     return business
 
 
@@ -202,9 +241,6 @@ def get_recent_business_records(
         "total_pages": (total_count + per_page - 1) // per_page
     }
 
-
-# ── IMPORTANT: /all must be ABOVE /{record_id} so FastAPI doesn't treat
-#    the literal string "all" as a record_id integer ──────────────────────
 @router.get("/all")
 def get_all_business_records(
     db: Session = Depends(get_db),
@@ -276,36 +312,65 @@ def update_business_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
+    """Update business record with validation"""
     record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Business record not found")
-
+    
+    # Check for duplicate business (excluding current record)
+    if data.establishment_name and data.location:
+        duplicate = check_duplicate_business(db, data.establishment_name, data.location, record_id)
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Business '{data.establishment_name}' already exists in {data.location}"
+            )
+    
+    # Validate BIN if provided and changed
+    if data.bin_number and data.bin_number.strip() and data.bin_number != record.bin_number:
+        from app.utils.bin_validator import validate_bin_number
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
+        formats_json = setting.value if setting else None
+        is_valid, error_msg = validate_bin_number(data.bin_number, formats_json)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg or "Invalid BIN number format"
+            )
+    
     changes = {}
+    
     update_data = data.dict(exclude_unset=True)
-
+    
     for key, value in update_data.items():
         if value is not None:
             old_value = getattr(record, key)
             if old_value != value:
                 changes[key] = {"old": str(old_value), "new": str(value)}
                 setattr(record, key, value)
-
+    
     if 'owner_last_name' in update_data and update_data['owner_last_name']:
         record.owner_last_name = update_data['owner_last_name'].upper()
+    
     if 'owner_first_name' in update_data and update_data['owner_first_name']:
         record.owner_first_name = update_data['owner_first_name'].upper()
+    
     if 'owner_middle_name' in update_data and update_data['owner_middle_name']:
         record.owner_middle_name = update_data['owner_middle_name'].upper()
-
+    
     record.updated_at = datetime.utcnow()
+    
     db.commit()
     db.refresh(record)
-
+    
     log_audit(
-        db, current_user.id, "UPDATE", "BUSINESS",
-        record.id, {"name": record.establishment_name, "changes": changes}
+        db, current_user.id, "UPDATE", "BUSINESS", 
+        record.id, {
+            "name": record.establishment_name,
+            "changes": changes
+        }
     )
-
+    
     return record
 
 
