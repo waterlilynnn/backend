@@ -1,48 +1,37 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any, Dict
 from datetime import datetime
 
-class HaulerRequirementBase(BaseModel):
-    hauler_type: str
-    requirement_name: str
-    description: Optional[str] = None
-    is_required: bool = True
-    sort_order: int = 0
+class RequirementChecklistCreate(BaseModel):
+    dti_registration: bool = False
+    mayor_permit: bool = False
+    occupancy_permit: bool = False
+    sanitation_permit: bool = False
+    fire_safety_cert: bool = False
+    environmental_compliance: bool = False
+    additional_documents: Optional[Dict[str, Any]] = None
 
-class HaulerRequirementCreate(HaulerRequirementBase):
-    pass
+class RequirementChecklistUpdate(BaseModel):
+    dti_registration: Optional[bool] = None
+    mayor_permit: Optional[bool] = None
+    occupancy_permit: Optional[bool] = None
+    sanitation_permit: Optional[bool] = None
+    fire_safety_cert: Optional[bool] = None
+    environmental_compliance: Optional[bool] = None
+    additional_documents: Optional[Dict[str, Any]] = None
 
-class HaulerRequirementUpdate(BaseModel):
-    hauler_type: Optional[str] = None
-    requirement_name: Optional[str] = None
-    description: Optional[str] = None
-    is_required: Optional[bool] = None
-    sort_order: Optional[int] = None
-
-class HaulerRequirementResponse(HaulerRequirementBase):
+class RequirementChecklistResponse(BaseModel):
     id: int
-    is_active: bool
-    created_at: datetime
-    
-    class Config:
-        from_attributes = True
+    business_record_id: int
+    dti_registration: bool
+    mayor_permit: bool
+    occupancy_permit: bool
+    sanitation_permit: bool
+    fire_safety_cert: bool
+    environmental_compliance: bool
+    additional_documents: Optional[Dict[str, Any]]
+    submitted_at: Optional[datetime]
+    last_updated_at: Optional[datetime]
 
-class BusinessRequirementUpdate(BaseModel):
-    is_completed: Optional[bool] = None
-    notes: Optional[str] = None
-
-class BusinessRequirementResponse(BaseModel):
-    id: int
-    business_id: int
-    requirement_id: int
-    is_completed: bool
-    completed_date: Optional[datetime]
-    notes: Optional[str]
-    completed_by: Optional[str]
-    
-    requirement_name: str
-    description: Optional[str]
-    is_required: bool
-    
     class Config:
         from_attributes = True

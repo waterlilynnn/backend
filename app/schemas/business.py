@@ -28,7 +28,7 @@ class BusinessCreate(BaseModel):
     contact_number: Optional[str] = None
     email: Optional[EmailStr] = None
     
-    location: str  # Required
+    location: str 
     has_own_structure: bool = False
     
     hauler_type: HaulerType
@@ -43,12 +43,12 @@ class BusinessCreate(BaseModel):
         return v.strip().upper()
 
 class BusinessUpdate(BaseModel):
-    # Business Information
+    # Business information
     bin_number: Optional[str] = None
     establishment_name: Optional[str] = None
     business_line: Optional[str] = None
     
-    # Owner Information
+    # Owner information
     owner_last_name: Optional[str] = None
     owner_first_name: Optional[str] = None
     owner_middle_name: Optional[str] = None
@@ -65,11 +65,11 @@ class BusinessUpdate(BaseModel):
     # Classification
     hauler_type: Optional[HaulerType] = None
     
-    # Application Details
+    # Application details
     application_type: Optional[ApplicationType] = None
     application_date: Optional[datetime] = None
     
-    # Clearance Info
+    # Clearance info
     control_number: Optional[str] = None
     date_issued: Optional[date] = None
     validity: Optional[date] = None
@@ -139,6 +139,7 @@ class BusinessSearchResponse(BaseModel):
     status: str
     control_number: Optional[str]
     has_violation: bool
+    violation_details: Optional[str] = None
     
     class Config:
         from_attributes = True

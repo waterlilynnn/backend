@@ -1,14 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, date
 
 from app.core.database import get_db
 from app.core.security import staff_only, admin_only, log_audit
 from app.models.user import User
 from app.models.business_record import BusinessRecord, HaulerType
+from app.models.setting import SystemSetting
 from app.schemas.business import (
-    BusinessCreate, BusinessUpdate, BusinessResponse, 
+    BusinessCreate, BusinessUpdate, BusinessResponse,
     BusinessSearchResponse
 )
 
@@ -18,26 +19,35 @@ router = APIRouter(
 )
 
 def generate_control_number(db: Session, application_type: str, existing_business=None) -> str:
-    """Generate control number based on application type"""
-    
     year = datetime.now().year
     month = datetime.now().strftime("%m")
-    
-    # For RENEWAL, check if there's an existing control number
+
     if application_type == "RENEWAL" and existing_business and existing_business.control_number:
         return existing_business.control_number
-    
+
     latest = db.query(BusinessRecord).filter(
         BusinessRecord.control_number.like(f"EMC-{year}-{month}%")
     ).order_by(BusinessRecord.control_number.desc()).first()
-    
+
     if latest and latest.control_number:
         last_seq = int(latest.control_number[-4:])
         new_seq = last_seq + 1
     else:
         new_seq = 1
-    
+
     return f"EMC-{year}-{month}-{new_seq:04d}"
+
+
+def check_duplicate_business(db: Session, establishment_name: str, location: str, exclude_id: int = None):
+    """Check if a business with same name and location already exists"""
+    query = db.query(BusinessRecord).filter(
+        BusinessRecord.establishment_name.ilike(establishment_name),
+        BusinessRecord.location == location
+    )
+    if exclude_id:
+        query = query.filter(BusinessRecord.id != exclude_id)
+    return query.first()
+
 
 @router.post("/", response_model=BusinessResponse, status_code=status.HTTP_201_CREATED)
 def create_business_record(
@@ -45,7 +55,27 @@ def create_business_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Create a new business record (auto-approved with control number)"""
+    """Create a new business record with validation"""
+    
+    # Check for duplicate business
+    duplicate = check_duplicate_business(db, data.establishment_name, data.location)
+    if duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Business '{data.establishment_name}' already exists in {data.location}"
+        )
+    
+    # Validate BIN if provided
+    if data.bin_number and data.bin_number.strip():
+        from app.utils.bin_validator import validate_bin_number
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
+        formats_json = setting.value if setting else None
+        is_valid, error_msg = validate_bin_number(data.bin_number, formats_json)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg or "Invalid BIN number format"
+            )
     
     # Check for existing business (for renewal)
     existing = None
@@ -91,35 +121,35 @@ def create_business_record(
         business.id, {
             "name": business.establishment_name,
             "control_number": business.control_number,
-            "type": business.application_type
+            "type": business.application_type,
+            "location": business.location
         }
     )
     
     return business
 
+
 @router.get("/search", response_model=List[BusinessSearchResponse])
 def search_business_records(
-    q: str = Query("", min_length=0, description="Search query"), 
+    q: str = Query("", min_length=2, description="Search query"),
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Search business records by name, owner, or BIN"""
-    
     if not q or len(q) < 2:
-        return []  
-    
+        return []
+
     search_term = f"%{q}%"
-    
+
     results = db.query(BusinessRecord).filter(
         (BusinessRecord.establishment_name.ilike(search_term)) |
         (BusinessRecord.owner_last_name.ilike(search_term)) |
         (BusinessRecord.owner_first_name.ilike(search_term)) |
+        (BusinessRecord.owner_name_raw.ilike(search_term)) |
         (BusinessRecord.bin_number.ilike(search_term))
-    ).order_by(BusinessRecord.created_at.desc()).limit(20).all()
-    
+    ).order_by(BusinessRecord.created_at.desc()).limit(50).all()
+
     response_data = []
     for record in results:
-        # Format owner name
         if record.owner_last_name and record.owner_first_name:
             owner_name = f"{record.owner_last_name}, {record.owner_first_name}"
             if record.owner_middle_name:
@@ -128,14 +158,13 @@ def search_business_records(
                 owner_name += f" {record.owner_suffix}"
         else:
             owner_name = record.owner_name_raw or "—"
-        
+
         app_type = "NEW"
         if record.application_type:
             app_type = record.application_type.value if hasattr(record.application_type, 'value') else str(record.application_type)
-        
-        # Get application date
+
         app_date = record.application_date or record.created_at
-        
+
         response_data.append({
             "id": record.id,
             "establishment_name": record.establishment_name,
@@ -146,54 +175,32 @@ def search_business_records(
             "status": record.status,
             "control_number": record.control_number,
             "has_violation": record.has_violation,
-            "business_line": record.business_line,           
-            "application_type": app_type,                    
-            "application_date": app_date.isoformat() if app_date else None,  
+            "violation_details": record.violation_details,
+            "business_line": record.business_line,
+            "application_type": app_type,
+            "application_date": app_date.isoformat() if app_date else None,
             "created_at": record.created_at.isoformat() if record.created_at else None
         })
-    
+
     return response_data
 
-@router.delete("/{record_id}")
-def delete_business_record(
-    record_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(staff_only)
-):
-    """Permanently delete a business record"""
-    record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Business record not found")
-    
-    log_audit(
-        db, current_user.id, "DELETE", "BUSINESS", 
-        record.id, {"name": record.establishment_name}
-    )
-    
-    db.delete(record)
-    db.commit()
-    
-    return {"message": "Business record deleted successfully"}
 
 @router.get("/recent", response_model=dict)
 def get_recent_business_records(
-    page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(10, ge=1, le=100, description="Items per page"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Get recent business records with application date and type"""
-    
     offset = (page - 1) * per_page
     total_count = db.query(BusinessRecord).count()
-    
+
     results = db.query(BusinessRecord).order_by(
         BusinessRecord.created_at.desc()
     ).offset(offset).limit(per_page).all()
-    
+
     items = []
     for record in results:
-        # Format owner name
         if record.owner_last_name and record.owner_first_name:
             owner_name = f"{record.owner_last_name}, {record.owner_first_name}"
             if record.owner_middle_name:
@@ -202,14 +209,13 @@ def get_recent_business_records(
                 owner_name += f" {record.owner_suffix}"
         else:
             owner_name = record.owner_name_raw or "—"
-        
+
         app_type = "NEW"
         if record.application_type:
             app_type = record.application_type.value if hasattr(record.application_type, 'value') else str(record.application_type)
-        
-        # Get application date (use application_date if available, else created_at)
+
         app_date = record.application_date or record.created_at
-        
+
         items.append({
             "id": record.id,
             "establishment_name": record.establishment_name,
@@ -220,12 +226,13 @@ def get_recent_business_records(
             "status": record.status,
             "control_number": record.control_number,
             "has_violation": record.has_violation,
+            "violation_details": record.violation_details,
             "business_line": record.business_line,
             "application_type": app_type,
             "application_date": app_date,
             "created_at": record.created_at
         })
-    
+
     return {
         "items": items,
         "total": total_count,
@@ -234,25 +241,69 @@ def get_recent_business_records(
         "total_pages": (total_count + per_page - 1) // per_page
     }
 
+@router.get("/all")
+def get_all_business_records(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only)
+):
+    try:
+        results = db.query(BusinessRecord).order_by(
+            BusinessRecord.created_at.desc()
+        ).all()
+
+        response_data = []
+        for record in results:
+            if record.owner_last_name and record.owner_first_name:
+                owner_name = f"{record.owner_last_name}, {record.owner_first_name}"
+                if record.owner_middle_name:
+                    owner_name += f" {record.owner_middle_name[0]}."
+                if record.owner_suffix:
+                    owner_name += f" {record.owner_suffix}"
+            else:
+                owner_name = record.owner_name_raw or "—"
+
+            response_data.append({
+                "id": record.id,
+                "establishment_name": record.establishment_name or "",
+                "owner_name": owner_name,
+                "bin_number": record.bin_number,
+                "location": record.location,
+                "hauler_type": record.hauler_type.value if record.hauler_type else "",
+                "status": record.status or "Pending",
+                "control_number": record.control_number,
+                "has_violation": bool(record.has_violation),
+                "violation_details": record.violation_details,
+                "business_line": record.business_line or "",
+                "application_type": record.application_type.value if record.application_type else "NEW",
+                "application_date": record.application_date.isoformat() if record.application_date else None,
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+            })
+
+        return response_data
+    except Exception as e:
+        print(f"ERROR in /all: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
 @router.get("/{record_id}", response_model=BusinessResponse)
 def get_business_record(
     record_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Get business record by ID"""
     try:
         record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
-        
         if not record:
             raise HTTPException(status_code=404, detail="Business record not found")
-        
         return record
     except Exception as e:
         print(f"Error fetching business {record_id}: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.put("/{record_id}", response_model=BusinessResponse)
 def update_business_record(
@@ -261,10 +312,31 @@ def update_business_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Update business record - ALL fields editable"""
+    """Update business record with validation"""
     record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Business record not found")
+    
+    # Check for duplicate business (excluding current record)
+    if data.establishment_name and data.location:
+        duplicate = check_duplicate_business(db, data.establishment_name, data.location, record_id)
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Business '{data.establishment_name}' already exists in {data.location}"
+            )
+    
+    # Validate BIN if provided and changed
+    if data.bin_number and data.bin_number.strip() and data.bin_number != record.bin_number:
+        from app.utils.bin_validator import validate_bin_number
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
+        formats_json = setting.value if setting else None
+        is_valid, error_msg = validate_bin_number(data.bin_number, formats_json)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg or "Invalid BIN number format"
+            )
     
     changes = {}
     
@@ -302,40 +374,22 @@ def update_business_record(
     return record
 
 
-@router.get("/all", response_model=List[BusinessSearchResponse])
-def get_all_business_records(
+@router.delete("/{record_id}")
+def delete_business_record(
+    record_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Get all business records"""
-    
-    results = db.query(BusinessRecord).order_by(
-        BusinessRecord.created_at.desc()
-    ).all()
-    
-    response_data = []
-    for record in results:
-        if record.owner_last_name and record.owner_first_name:
-            owner_name = f"{record.owner_last_name}, {record.owner_first_name}"
-            if record.owner_middle_name:
-                owner_name += f" {record.owner_middle_name[0]}."
-            if record.owner_suffix:
-                owner_name += f" {record.owner_suffix}"
-        else:
-            owner_name = record.owner_name_raw or "—"
-        
-        response_data.append({
-            "id": record.id,
-            "establishment_name": record.establishment_name,
-            "owner_name": owner_name,
-            "bin_number": record.bin_number,
-            "location": record.location,
-            "hauler_type": record.hauler_type.value if hasattr(record.hauler_type, 'value') else str(record.hauler_type),
-            "status": record.status,
-            "control_number": record.control_number,
-            "has_violation": record.has_violation,
-            "business_line": record.business_line,  
-            "created_at": record.created_at,
-        })
-    
-    return response_data
+    record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Business record not found")
+
+    log_audit(
+        db, current_user.id, "DELETE", "BUSINESS",
+        record.id, {"name": record.establishment_name}
+    )
+
+    db.delete(record)
+    db.commit()
+
+    return {"message": "Business record deleted successfully"}

@@ -18,10 +18,16 @@ class Inspection(Base):
     inspection_date = Column(DateTime, default=datetime.utcnow)
     status = Column(Enum(InspectionStatus), nullable=False)
     remarks = Column(Text, nullable=True)
-    
     scanned_from_qr = Column(Boolean, default=False)
+    
+    # Resolution fields
+    is_resolved = Column(Boolean, default=False)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
+    resolved_remarks = Column(Text, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     
     business_record = relationship("BusinessRecord", back_populates="inspections")
     inspector = relationship("User", foreign_keys=[inspector_id], back_populates="inspections")
+    resolver = relationship("User", foreign_keys=[resolved_by])

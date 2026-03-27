@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 import os
 from pathlib import Path
 
@@ -69,7 +69,6 @@ def get_pending_clearances(
     
     return result
 
-# Generate clearance
 @router.post("/generate/{business_id}")
 def generate_clearance(
     business_id: int,
@@ -78,7 +77,7 @@ def generate_clearance(
 ):
     """Generate clearance for approved business - checks for violations first"""
     
-    # Check if business exists and is approved
+    # Check if business exists
     business = db.query(BusinessRecord).filter(
         BusinessRecord.id == business_id,
         BusinessRecord.status == "Approved"
@@ -151,7 +150,7 @@ def generate_clearance(
     year = datetime.now().year
     expires_at = datetime(year, 12, 31, 23, 59, 59)
     
-    # Create clearance with business control number
+    # Create clearance with control number
     clearance = Clearance(
         business_record_id=business_id,
         control_number=business.control_number, 
@@ -170,7 +169,6 @@ def generate_clearance(
     db.commit()
     db.refresh(clearance)
     
-    # Log audit
     log_audit(
         db, current_user.id, "GENERATE", "CLEARANCE", 
         clearance.id, {"control_number": clearance.control_number}
@@ -263,7 +261,6 @@ def get_clearance(
         "bin_number": business.bin_number,
     }
 
-# Get clearance PDF for VIEWING (does not increment print count)
 @router.post("/view/{clearance_id}")
 def view_clearance_pdf(
     clearance_id: int,
@@ -320,6 +317,9 @@ def view_clearance_pdf(
     from app.utils.pdf_generator import generate_clearance_pdf
     pdf_path = generate_clearance_pdf(clearance_data, filename)
     
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=500, detail="Failed to generate PDF")
+    
     return FileResponse(
         path=pdf_path,
         filename=f"EMC_CLEARANCE_{clearance.control_number}.pdf",
@@ -329,7 +329,6 @@ def view_clearance_pdf(
         }
     )
 
-# Print clearance (increments print count)
 @router.post("/print/{clearance_id}")
 def print_clearance(
     clearance_id: int,
@@ -353,7 +352,6 @@ def print_clearance(
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
     
-    # Increment print count
     clearance.print_count += 1
     clearance.last_printed_at = datetime.now()
     clearance.last_printed_by = current_user.id
@@ -412,9 +410,25 @@ def print_clearance(
 def get_clearance_history(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only),
+    search: Optional[str] = None,  
     limit: int = 100
 ):
     """Get all clearances with printer info"""
+    
+    query = db.query(Clearance).options(
+        joinedload(Clearance.business_record),
+        joinedload(Clearance.printer_user),
+        joinedload(Clearance.last_printer_user)
+    )
+    
+    if search and len(search) >= 2:
+        search_term = f"%{search}%"
+        query = query.join(Clearance.business_record).filter(
+            (BusinessRecord.establishment_name.ilike(search_term)) |
+            (Clearance.control_number.ilike(search_term))
+        )
+    
+    clearances = query.order_by(Clearance.created_at.desc()).limit(limit).all()
     
     clearances = db.query(Clearance).options(
         joinedload(Clearance.business_record),
