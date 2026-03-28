@@ -33,6 +33,7 @@ def get_business_requirements(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
+    """Get requirements checklist for a business with proper filtering"""
     business = db.query(BusinessRecord).filter(BusinessRecord.id == business_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
@@ -43,7 +44,7 @@ def get_business_requirements(
         else str(business.hauler_type)
     )
 
-    # Get all active templates (no default seeding)
+    # Get all active templates (global + hauler-specific)
     templates = db.query(RequirementTemplate).filter(
         RequirementTemplate.is_active == True
     ).order_by(

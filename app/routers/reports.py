@@ -33,9 +33,9 @@ def _fmt(d) -> str:
 @router.get("/clearances/download")
 def download_clearances_pdf(
     date_from: Optional[date] = None,
-    date_to:   Optional[date] = None,
-    status:    Optional[str]  = Query(None),
-    search:    Optional[str]  = None,
+    date_to: Optional[date] = None,
+    status: Optional[str] = Query(None),
+    search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only),
 ):
@@ -70,18 +70,36 @@ def download_clearances_pdf(
     else:
         status_label = None
 
-    # Removed "Printed By" column - now only 5 columns
+    # Add line breaks for long business names using <br/> in the cell text
     col_labels = ["Control #", "Business Name", "Hauler", "Last Downloaded", "Status"]
     rows = []
     for c in clearances:
         biz = c.business_record
+        # Insert <br/> for long business names (>40 chars)
+        name = biz.establishment_name if biz else "—"
+        if len(name) > 40:
+            # Find a space to break at ~40 chars
+            break_pos = name[:40].rfind(' ')
+            if break_pos == -1:
+                break_pos = 40
+            name = name[:break_pos] + "<br/>" + name[break_pos:].strip()
+        
         rows.append([
             c.control_number or "—",
-            biz.establishment_name if biz else "—",
+            name,
             (biz.hauler_type.value if hasattr(biz.hauler_type, "value") else str(biz.hauler_type)) if biz else "—",
             _fmt(c.last_printed_at or c.printed_at),
             "Issued" if c.is_claimed else "Pending",
         ])
+
+    # Generate period label for report
+    period_label = None
+    if date_from and date_to:
+        period_label = f"{date_from.strftime('%B %d, %Y')} - {date_to.strftime('%B %d, %Y')}"
+    elif date_from:
+        period_label = f"From {date_from.strftime('%B %d, %Y')}"
+    elif date_to:
+        period_label = f"Until {date_to.strftime('%B %d, %Y')}"
 
     filename = f"clearances_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     pdf_path = generate_report_pdf(
@@ -90,6 +108,8 @@ def download_clearances_pdf(
         rows=rows,
         filename=filename,
         status_label=status_label,
+        generated_by=current_user.full_name,
+        period_label=period_label,
     )
 
     log_audit(

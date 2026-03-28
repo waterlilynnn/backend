@@ -2,6 +2,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas as rl_canvas
+from datetime import datetime
 from pathlib import Path
 
 UPLOAD_DIR = Path("uploads/clearances")
@@ -16,11 +17,11 @@ HEADER_COLOR  = (0.11,  0.22,  0.48)
 TEXT_COLOR    = (0.05,  0.12,  0.30)
 
 STICKER_MAP = {
-    "Barangay":    "sticker-barangay.jpeg",
-    "City":        "sticker-city.jpeg",
-    "Accredited":  "sticker-accredited.jpeg",
-    "Hazardous":   "sticker-hazardous.jpeg",
-    "Exempted":    "sticker-exempted.jpeg",
+    "Barangay":    "sticker-barangay.png",
+    "City":        "sticker-city.png",
+    "Accredited":  "sticker-accredited.png",
+    "Hazardous":   "sticker-hazardous.png",
+    "Exempted":    "sticker-exempted.png",
     "No Contract": None,
 }
 
@@ -33,14 +34,36 @@ def find_asset(filename):
     return None
 
 
-def get_sticker_path(hauler_type):
+def get_sticker_year():
+    """Determine sticker year based on cutoff (November)"""
+    now = datetime.now()
+    # If month is November or December, use next year
+    if now.month >= 11:
+        return now.year + 1
+    return now.year
+
+def get_sticker_path(hauler_type, year=None):
+    """Get sticker path with dynamic year in filename"""
+    if year is None:
+        year = get_sticker_year()
+    
     filename = STICKER_MAP.get(hauler_type)
     if not filename:
         return None
+    
+    # Check if there's a year-specific version
+    base_name = filename.replace('.png', '')
+    year_filename = f"{base_name}_{year}.png"
+    
     for d in [STICKERS_DIR, FRONTEND_PUBLIC, Path("public")]:
-        p = d / filename
+        p = d / year_filename
         if p.exists():
             return str(p)
+        # Fallback to regular filename
+        p2 = d / filename
+        if p2.exists():
+            return str(p2)
+    
     return None
 
 
@@ -86,6 +109,27 @@ def format_date(date_str: str) -> str:
         except ValueError:
             continue
     return date_str
+
+
+def draw_sticker_year(c, x, y, width, height, year):
+    # Save current state
+    c.saveState()
+    
+    # Calculate position
+    center_x = x + (width / 2) + 6.5*mm  
+    center_y = y + (height / 2) - 3*mm
+    
+    # Set font
+    c.setFont("Helvetica-Bold", 25)
+    c.setFillColorRGB(0.2, 0.2, 0.2)  
+    
+    # Draw the year
+    year_str = str(year)
+    text_width = c.stringWidth(year_str, "Helvetica-Bold", 25)
+    c.drawString(center_x - (text_width / 2), center_y - 10, year_str)
+    
+    # Restore state
+    c.restoreState()
 
 
 def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
@@ -162,11 +206,14 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.setLineWidth(1.5)
     c.rect(21*mm, H - 40.65*mm, 42.5*mm, 21.4*mm, fill=0, stroke=1)
 
-    sticker_path = get_sticker_path(clearance_data.get('hauler_type', ''))
+    current_year = get_sticker_year()
+    sticker_path = get_sticker_path(clearance_data.get('hauler_type', ''), current_year)
+    
     if sticker_path:
         c.drawImage(sticker_path, stk_x, stk_y,
                     width=stk_w, height=stk_h,
                     preserveAspectRatio=True, anchor='c', mask='auto')
+        draw_sticker_year(c, stk_x, stk_y, stk_w, stk_h, current_year)
 
     sep_y = t3_y - 3*mm
     c.setStrokeColor(bc)

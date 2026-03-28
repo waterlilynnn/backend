@@ -3,6 +3,7 @@ from .user import User
 from .business_record import BusinessRecord
 from .clearance import Clearance
 from .inspection import Inspection
+from .inspection_checklist import InspectionChecklist
 from .audit_log import AuditLog
 from .requirement import RequirementTemplate, RequirementSubmission
 from .setting import SystemSetting
@@ -13,6 +14,7 @@ __all__ = [
     "BusinessRecord",
     "Clearance",
     "Inspection",
+    "InspectionChecklist",
     "AuditLog",
     "RequirementTemplate",
     "RequirementSubmission",

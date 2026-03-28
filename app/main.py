@@ -21,6 +21,7 @@ from app.models.user import User
 from app.models.business_record import BusinessRecord, HaulerType
 from app.models.clearance import Clearance
 from app.models.inspection import Inspection
+from app.models.inspection_checklist import InspectionChecklist
 from app.models.audit_log import AuditLog
 from app.models.setting import SystemSetting
 
@@ -32,7 +33,7 @@ from app.utils.bin_validator import validate_bin_number
 import traceback
 import sys
 
-# Create tables
+# Create all tables (InspectionChecklist included)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -41,7 +42,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Include routers
+# Routers
 app.include_router(admin.router)
 app.include_router(clearance.router)
 app.include_router(business.router)
@@ -52,12 +53,14 @@ app.include_router(requirements.router)
 app.include_router(reports.router)
 app.include_router(settings.router)
 
-# CORS middleware
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -109,18 +112,12 @@ def get_psic_categories():
 
 @app.post("/validate-bin", tags=["Options"])
 def validate_bin(bin_number: str, db: Session = Depends(get_db)):
-    """Validate BIN number against admin-configured formats."""
-    # Fetch current formats from DB
     setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
     formats_json = setting.value if setting else None
-
     is_valid, error_message = validate_bin_number(bin_number, formats_json)
-    return {
-        "valid": is_valid,
-        "message": error_message or "Valid BIN number format"
-    }
+    return {"valid": is_valid, "message": error_message or "Valid BIN number format"}
 
-# Debug endpoints ( for development only, must be removed in production)
+# debug endpoints-to be removed in production   
 @app.get("/debug/check-user/{email}")
 def debug_check_user(email: str, db: Session = Depends(get_db)):
     user = db.query(User).options(joinedload(User.role)).filter(User.email == email).first()
@@ -133,7 +130,7 @@ def debug_check_user(email: str, db: Session = Depends(get_db)):
         "email": user.email,
         "full_name": user.full_name,
         "role": user.role.name if user.role else "No role",
-        "is_active": user.is_active
+        "is_active": user.is_active,
     }
 
 @app.get("/debug/test-db", tags=["Debug"])
@@ -146,6 +143,7 @@ def test_database_connection(db: Session = Depends(get_db)):
             "businesses_count": db.query(BusinessRecord).count(),
             "clearances_count": db.query(Clearance).count(),
             "inspections_count": db.query(Inspection).count(),
+            "inspection_checklists_count": db.query(InspectionChecklist).count(),
             "audit_logs_count": db.query(AuditLog).count(),
         }
     except Exception as e:

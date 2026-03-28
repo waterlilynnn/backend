@@ -89,17 +89,21 @@ def list_requirement_templates(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
 ):
+    """Get all requirement templates with proper ordering"""
     q = db.query(RequirementTemplate)
+    
     if not include_inactive:
         q = q.filter(RequirementTemplate.is_active == True)
+    
+    # Filter by hauler_type if specified
     if hauler_type:
         q = q.filter(
             (RequirementTemplate.hauler_type == None) |
             (RequirementTemplate.hauler_type == hauler_type)
         )
     
+    # Order by sort_order
     return q.order_by(
-        RequirementTemplate.hauler_type.nullsfirst(),
         RequirementTemplate.sort_order,
         RequirementTemplate.id
     ).all()
@@ -111,7 +115,7 @@ def create_requirement_template(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
 ):
-    # Prevent exact duplicates (same label + same hauler scope)
+    # Prevent exact duplicates
     existing = db.query(RequirementTemplate).filter(
         RequirementTemplate.label       == data.label,
         RequirementTemplate.is_active   == True,
@@ -137,9 +141,7 @@ def create_requirement_template(
     # Backfill: only create submissions for businesses where this template applies
     biz_query = db.query(BusinessRecord)
     if data.hauler_type:
-        # Specific hauler — only those businesses
         biz_query = biz_query.filter(BusinessRecord.hauler_type == data.hauler_type)
-    # else: global — all businesses get it
 
     for biz in biz_query.all():
         # Avoid duplicate submissions
@@ -214,3 +216,152 @@ def reorder_requirements(
             template.sort_order = idx + 1
     db.commit()
     return {"message": "Order updated"}
+
+# business lines management
+@router.get("/business-lines", tags=["Admin Settings"])
+def get_business_lines(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Get all configured business lines"""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "business_lines").first()
+    if not setting or not setting.value:
+        from app.utils.constants import BUSINESS_LINES
+        return {"business_lines": BUSINESS_LINES}
+    
+    try:
+        lines = json.loads(setting.value)
+        return {"business_lines": lines}
+    except:
+        from app.utils.constants import BUSINESS_LINES
+        return {"business_lines": BUSINESS_LINES}
+
+@router.put("/business-lines", tags=["Admin Settings"])
+def update_business_lines(
+    payload: dict,  # {"business_lines": ["Line1", "Line2"]}
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Update the list of business lines"""
+    lines = payload.get("business_lines", [])
+    if not lines:
+        raise HTTPException(400, "At least one business line is required")
+    
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "business_lines").first()
+    if not setting:
+        setting = SystemSetting(
+            key="business_lines",
+            label="Business Lines",
+            category="general"
+        )
+        db.add(setting)
+    
+    setting.value = json.dumps(lines)
+    setting.updated_by = current_user.id
+    setting.updated_at = datetime.utcnow()
+    db.commit()
+    
+    log_audit(db, current_user.id, "UPDATE", "SETTING", None, {"key": "business_lines"})
+    return {"message": "Business lines updated", "count": len(lines)}
+
+@router.get("/exempted-lines", tags=["Admin Settings"])
+def get_exempted_business_lines(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Get business lines exempted from requirements"""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "exempted_business_lines").first()
+    if not setting or not setting.value:
+        return {"exempted_lines": []}
+    
+    try:
+        lines = json.loads(setting.value)
+        return {"exempted_lines": lines}
+    except:
+        return {"exempted_lines": []}
+
+@router.put("/exempted-lines", tags=["Admin Settings"])
+def update_exempted_business_lines(
+    payload: dict,  
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Update business lines exempted from requirements"""
+    lines = payload.get("exempted_lines", [])
+    
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "exempted_business_lines").first()
+    if not setting:
+        setting = SystemSetting(
+            key="exempted_business_lines",
+            label="Exempted Business Lines",
+            category="requirements"
+        )
+        db.add(setting)
+    
+    setting.value = json.dumps(lines)
+    setting.updated_by = current_user.id
+    setting.updated_at = datetime.utcnow()
+    db.commit()
+    
+    log_audit(db, current_user.id, "UPDATE", "SETTING", None, {"key": "exempted_business_lines"})
+    return {"message": "Exempted lines updated", "count": len(lines)}
+
+# signaatories managemebt
+@router.get("/signatories", tags=["Admin Settings"])
+def get_signatories(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Get clearance signatory information"""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "signatories").first()
+    if not setting or not setting.value:
+        return {
+            "recommending_name": "ANTONETTE NICOLE D. BAYOT",
+            "recommending_title": "ENGINEER I",
+            "approving_name": "OSCAR B. LAURENCIANA",
+            "approving_title": "OIC-CENRO"
+        }
+    
+    try:
+        return json.loads(setting.value)
+    except:
+        return {
+            "recommending_name": "ANTONETTE NICOLE D. BAYOT",
+            "recommending_title": "ENGINEER I",
+            "approving_name": "OSCAR B. LAURENCIANA",
+            "approving_title": "OIC-CENRO"
+        }
+
+@router.put("/signatories", tags=["Admin Settings"])
+def update_signatories(
+    payload: dict,  
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """Update clearance signatory information"""
+    required_fields = ["recommending_name", "recommending_title", "approving_name", "approving_title"]
+    for field in required_fields:
+        if field not in payload:
+            raise HTTPException(400, f"Missing field: {field}")
+    
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "signatories").first()
+    if not setting:
+        setting = SystemSetting(
+            key="signatories",
+            label="Clearance Signatories",
+            category="clearance"
+        )
+        db.add(setting)
+    
+    setting.value = json.dumps({
+        "recommending_name": payload["recommending_name"],
+        "recommending_title": payload["recommending_title"],
+        "approving_name": payload["approving_name"],
+        "approving_title": payload["approving_title"]
+    })
+    setting.updated_by = current_user.id
+    setting.updated_at = datetime.utcnow()
+    db.commit()
+    
+    log_audit(db, current_user.id, "UPDATE", "SETTING", None, {"key": "signatories"})
+    return {"message": "Signatories updated"}

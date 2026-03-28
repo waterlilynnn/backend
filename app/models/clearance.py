@@ -38,9 +38,9 @@ class Clearance(Base):
     last_printed_at = Column(DateTime, default=datetime.utcnow)
     last_printed_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
     
+    created_at = Column(DateTime, default=datetime.utcnow) 
+    
     # Relationships
     business_record = relationship("BusinessRecord", back_populates="clearances")
     printer_user = relationship("User", foreign_keys=[printed_by], back_populates="printed_clearances")
     last_printer_user = relationship("User", foreign_keys=[last_printed_by], back_populates="last_printed_clearances")
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
