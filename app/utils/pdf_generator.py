@@ -4,6 +4,11 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas as rl_canvas
 from datetime import datetime
 from pathlib import Path
+import base64
+import io
+from PIL import Image
+import tempfile
+import os
 
 UPLOAD_DIR = Path("uploads/clearances")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,36 +40,52 @@ def find_asset(filename):
 
 
 def get_sticker_year():
-    """Determine sticker year based on cutoff (November)"""
+    """Determine sticker year based on cutoff (November)."""
     now = datetime.now()
-    # If month is November or December, use next year
     if now.month >= 11:
         return now.year + 1
     return now.year
 
+
 def get_sticker_path(hauler_type, year=None):
-    """Get sticker path with dynamic year in filename"""
     if year is None:
         year = get_sticker_year()
-    
+
     filename = STICKER_MAP.get(hauler_type)
     if not filename:
         return None
-    
-    # Check if there's a year-specific version
-    base_name = filename.replace('.png', '')
+
+    base_name = filename.replace(".png", "")
     year_filename = f"{base_name}_{year}.png"
-    
+
     for d in [STICKERS_DIR, FRONTEND_PUBLIC, Path("public")]:
         p = d / year_filename
         if p.exists():
             return str(p)
-        # Fallback to regular filename
         p2 = d / filename
         if p2.exists():
             return str(p2)
-    
+
     return None
+
+
+def save_base64_image_to_temp(base64_string):
+    """Save a base64 image to a temporary file and return the path."""
+    if not base64_string:
+        return None
+
+    try:
+        if ',' in base64_string:
+            base64_string = base64_string.split(',')[1]
+
+        image_data = base64.b64decode(base64_string)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
+            tmp_file.write(image_data)
+            return tmp_file.name
+    except Exception as e:
+        print(f"Error saving signature: {e}")
+        return None
 
 
 def wrap_text(c, text, font, size, max_width):
@@ -84,7 +105,6 @@ def wrap_text(c, text, font, size, max_width):
 
 
 def draw_spaced(c, text, x, y, font, size, target_width):
-    """Draw text with letter spacing stretched to target_width."""
     if not text:
         return
     natural_w = c.stringWidth(text, font, size)
@@ -102,7 +122,6 @@ def draw_spaced(c, text, x, y, font, size, target_width):
 
 
 def format_date(date_str: str) -> str:
-    from datetime import datetime
     for fmt in ("%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(date_str.strip(), fmt).strftime("%m/%d/%Y")
@@ -112,24 +131,38 @@ def format_date(date_str: str) -> str:
 
 
 def draw_sticker_year(c, x, y, width, height, year):
-    # Save current state
     c.saveState()
-    
-    # Calculate position
-    center_x = x + (width / 2) + 6.5*mm  
-    center_y = y + (height / 2) - 3*mm
-    
-    # Set font
+    center_x = x + (width / 2) + 6.5 * mm
+    center_y = y + (height / 2) - 3 * mm
     c.setFont("Helvetica-Bold", 25)
-    c.setFillColorRGB(0.2, 0.2, 0.2)  
-    
-    # Draw the year
+    c.setFillColorRGB(0.2, 0.2, 0.2)
     year_str = str(year)
     text_width = c.stringWidth(year_str, "Helvetica-Bold", 25)
     c.drawString(center_x - (text_width / 2), center_y - 10, year_str)
-    
-    # Restore state
     c.restoreState()
+
+
+def draw_signature(c, sig_base64, x, y, width=40*mm, height=15*mm):
+    """Draw signature image from base64 string."""
+    if not sig_base64:
+        return False
+
+    temp_path = save_base64_image_to_temp(sig_base64)
+    if not temp_path or not os.path.exists(temp_path):
+        return False
+
+    try:
+        c.drawImage(temp_path, x, y, width=width, height=height,
+                    preserveAspectRatio=True, mask='auto')
+        os.unlink(temp_path)
+        return True
+    except Exception as e:
+        print(f"Error drawing signature: {e}")
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+        return False
 
 
 def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
@@ -138,6 +171,13 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     bc         = colors.Color(*PRIMARY)
     hc         = colors.Color(*HEADER_COLOR)
     text_color = colors.Color(*TEXT_COLOR)
+
+    recommending_name  = clearance_data.get("recommending_name", "ANTONETTE NICOLE D. BAYOT")
+    recommending_title = clearance_data.get("recommending_title", "ENGINEER I")
+    recommending_sig   = clearance_data.get("recommending_signature")
+    approving_name     = clearance_data.get("approving_name", "OSCAR B. LAURENCIANA")
+    approving_title    = clearance_data.get("approving_title", "OIC-CENRO")
+    approving_sig      = clearance_data.get("approving_signature")
 
     c = rl_canvas.Canvas(file_path, pagesize=A4)
 
@@ -168,10 +208,6 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
         c.drawImage(tagaytay_logo, logos_x, logo_y,
                     width=logo_size, height=logo_size,
                     preserveAspectRatio=True, anchor='c', mask='auto')
-    else:
-        c.setStrokeColorRGB(0.7, 0.7, 0.7)
-        c.setFillColorRGB(1, 1, 1)
-        c.rect(logos_x, logo_y, logo_size, logo_size, fill=1, stroke=1)
 
     bp_logo = find_asset("bp-logo.png")
     bp_x    = logos_x + logo_size + logo_gap
@@ -179,10 +215,6 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
         c.drawImage(bp_logo, bp_x, logo_y,
                     width=logo_size, height=logo_size,
                     preserveAspectRatio=True, anchor='c', mask='auto')
-    else:
-        c.setStrokeColorRGB(0.7, 0.7, 0.7)
-        c.setFillColorRGB(1, 1, 1)
-        c.rect(bp_x, logo_y, logo_size, logo_size, fill=1, stroke=1)
 
     t1_y = logo_y - 4.5*mm
     t2_y = t1_y   - 4.5*mm
@@ -207,8 +239,8 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.rect(21*mm, H - 40.65*mm, 42.5*mm, 21.4*mm, fill=0, stroke=1)
 
     current_year = get_sticker_year()
-    sticker_path = get_sticker_path(clearance_data.get('hauler_type', ''), current_year)
-    
+    sticker_path = get_sticker_path(clearance_data.get("hauler_type", ""), current_year)
+
     if sticker_path:
         c.drawImage(sticker_path, stk_x, stk_y,
                     width=stk_w, height=stk_h,
@@ -232,16 +264,16 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     colon_gap   = 3*mm
 
     fields = [
-        ("Name of Establishment:",               clearance_data.get('establishment_name', '')),
-        ("Business Identification Number (BIN):", clearance_data.get('bin_number', 'N/A')),
-        ("Line of Business:",                     clearance_data.get('business_line', '')),
-        ("Name of Registered Owner:",             clearance_data.get('owner_name', '')),
-        ("Location of Establishment:",            clearance_data.get('location', '')),
+        ("Name of Establishment:",               clearance_data.get("establishment_name", "")),
+        ("Business Identification Number (BIN):", clearance_data.get("bin_number", "N/A")),
+        ("Line of Business:",                     clearance_data.get("business_line", "")),
+        ("Name of Registered Owner:",             clearance_data.get("owner_name", "")),
+        ("Location of Establishment:",            clearance_data.get("location", "")),
     ]
 
     y_cursor = first_row_y
     for label, value in fields:
-        val_str   = str(value).upper() if value else ''
+        val_str   = str(value).upper() if value else ""
         lbl_val_x = field_x + c.stringWidth(label, "Helvetica-Bold", 10) + colon_gap
         lbl_max_w = val_end_x - lbl_val_x
         val_lines = wrap_text(c, val_str, "Helvetica-Bold", 10, lbl_max_w)
@@ -282,7 +314,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.drawString(field_x, row6_y, "Issued On:")
     c.setFillColor(hc)
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(issued_vx, row6_y, format_date(clearance_data.get('issued_date', '')))
+    c.drawString(issued_vx, row6_y, format_date(clearance_data.get("issued_date", "")))
     c.setStrokeColor(bc)
     c.setLineWidth(0.5)
     c.line(issued_vx, row6_y - 1.2*mm, valid_lx - 5*mm, row6_y - 1.2*mm)
@@ -292,7 +324,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.drawString(valid_lx, row6_y, "Valid Until:")
     c.setFillColor(hc)
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(valid_vx, row6_y, format_date(clearance_data.get('valid_until', '')))
+    c.drawString(valid_vx, row6_y, format_date(clearance_data.get("valid_until", "")))
     c.setStrokeColor(bc)
     c.line(valid_vx, row6_y - 1.2*mm, val_end_x, row6_y - 1.2*mm)
 
@@ -304,7 +336,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.setFillColor(text_color)
     c.setFont("Helvetica-Bold", 10)
     c.drawString(field_x, row7_y, "Control No.:")
-    ctrl_str = clearance_data.get('control_number', '').upper()
+    ctrl_str = clearance_data.get("control_number", "").upper()
     ctrl_nw  = c.stringWidth(ctrl_str, "Helvetica-Bold", 10)
     ctrl_aw  = type_lx - 5*mm - ctrl_vx
     ctrl_gap = min((ctrl_aw - ctrl_nw) / (len(ctrl_str) - 1), 1.2) if len(ctrl_str) > 1 and ctrl_nw < ctrl_aw else 0
@@ -324,7 +356,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.setFillColor(text_color)
     c.setFont("Helvetica-Bold", 10)
     c.drawString(type_lx, row7_y, "Type:")
-    type_str = clearance_data.get('application_type', 'NEW').upper()
+    type_str = clearance_data.get("application_type", "NEW").upper()
     type_nw  = c.stringWidth(type_str, "Helvetica-Bold", 10)
     type_aw  = val_end_x - type_vx
     type_gap = min((type_aw - type_nw) / (len(type_str) - 1), 1.2) if len(type_str) > 1 and type_nw < type_aw else 0
@@ -408,7 +440,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     first_nw   = c.stringWidth(nlines[0], "Helvetica-Bold", 13)
     n_first    = len(nlines[0])
     notice_gap = (text_w - first_nw) / (n_first - 1) if n_first > 1 and first_nw < text_w else 0
-    c.setFillColor(text_color)
+    c.setFillColorRGB(184, 15, 10)
     c.setFont("Helvetica-Bold", 13)
     for nl in nlines:
         if notice_gap > 0:
@@ -420,7 +452,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
             c.drawString(text_x, cond_y, nl)
         cond_y -= 5.5*mm
 
-    # signatories
+    # ── Signatory section ─────────────────────────────────────────────────────
     cond_y -= 3*mm
     c.setFont("Helvetica", 9.5)
     c.setFillColor(text_color)
@@ -429,22 +461,55 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
 
     left_cx  = W * 0.30
     right_cx = W * 0.72
-    padding  = 3 * mm  
+    padding  = 3 * mm
 
-    name_y = cond_y - 15*mm
+    # BUG FIX: The previous code set sig_y = name_y - 8*mm, which in PDF
+    # coordinate space (y increases upward) places the signature image BELOW
+    # the name text — the opposite of what's intended.
+    #
+    # Correct layout (top → bottom on page, i.e. decreasing y values):
+    #   cond_y          → "Recommending Approval:" / "Approval:" labels
+    #   cond_y - 3mm    → top of signature image box
+    #   cond_y - 15mm   → name text + underline
+    #   cond_y - 18.5mm → position/title text
+    #
+    # sig_height = 12mm, so the image occupies
+    #   y = (cond_y - 15mm) to y = (cond_y - 3mm), fitting neatly
+    #   in the gap between the label and the name.
 
-    left_name  = "ANTONETTE NICOLE D. BAYOT"
-    right_name = "OSCAR B. LAURENCIANA"
+    sig_width  = 35 * mm
+    sig_height = 12 * mm
 
-    left_name_w  = c.stringWidth(left_name,  "Helvetica-Bold", 10)
-    right_name_w = c.stringWidth(right_name, "Helvetica-Bold", 10)
+    # Name sits 15mm below the label
+    name_y = cond_y - 15 * mm
+
+    # BUG FIX: place signature so its TOP is ~3mm below the label and its
+    # BOTTOM sits ~0mm above the name baseline.
+    # In PDF coords: image bottom = name_y + 0mm, image top = name_y + sig_height
+    sig_y = name_y  # image draws from sig_y upward by sig_height mm
+
+    if recommending_sig:
+        draw_signature(
+            c, recommending_sig,
+            left_cx - sig_width / 2, sig_y,
+            sig_width, sig_height
+        )
+    if approving_sig:
+        draw_signature(
+            c, approving_sig,
+            right_cx - sig_width / 2, sig_y,
+            sig_width, sig_height
+        )
+
+    left_name_w  = c.stringWidth(recommending_name,  "Helvetica-Bold", 10)
+    right_name_w = c.stringWidth(approving_name, "Helvetica-Bold", 10)
     left_half    = left_name_w  / 2.25 + padding
     right_half   = right_name_w / 2.25 + padding
 
     c.setFont("Helvetica-Bold", 10)
     c.setFillColor(text_color)
-    c.drawCentredString(left_cx,  name_y, left_name)
-    c.drawCentredString(right_cx, name_y, right_name)
+    c.drawCentredString(left_cx,  name_y, recommending_name)
+    c.drawCentredString(right_cx, name_y, approving_name)
 
     sig_line_y = name_y - 1*mm
     c.setStrokeColor(text_color)
@@ -454,8 +519,8 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
 
     c.setFont("Helvetica", 9)
     c.setFillColor(text_color)
-    c.drawCentredString(left_cx,  sig_line_y - 3.5*mm, "ENGINEER I")
-    c.drawCentredString(right_cx, sig_line_y - 3.5*mm, "OIC-CENRO")
+    c.drawCentredString(left_cx,  sig_line_y - 3.5*mm, recommending_title)
+    c.drawCentredString(right_cx, sig_line_y - 3.5*mm, approving_title)
 
     truck_h    = 18*mm
     truck_w    = truck_h * (666 / 374)

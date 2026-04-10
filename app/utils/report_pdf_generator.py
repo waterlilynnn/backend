@@ -7,6 +7,9 @@ from reportlab.pdfgen import canvas as rl_canvas
 from pathlib import Path
 from datetime import datetime
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import base64
+import tempfile
+import os
 
 UPLOAD_DIR = Path("uploads/reports")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -24,6 +27,59 @@ def find_asset(filename):
         if p.exists():
             return str(p)
     return None
+
+
+def save_base64_image_to_temp(base64_string):
+    """Save a base64 image to a temporary file and return the path"""
+    if not base64_string:
+        print("[DEBUG] save_base64_image_to_temp: No base64 string provided")
+        return None
+    
+    try:
+        # Remove data URL prefix if present
+        if ',' in base64_string:
+            base64_string = base64_string.split(',')[1]
+            print("[DEBUG] Removed data URL prefix")
+        
+        # Decode base64
+        image_data = base64.b64decode(base64_string)
+        print(f"[DEBUG] Decoded image data size: {len(image_data)} bytes")
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
+            tmp_file.write(image_data)
+            print(f"[DEBUG] Saved signature to temp file: {tmp_file.name}")
+            return tmp_file.name
+    except Exception as e:
+        print(f"[ERROR] save_base64_image_to_temp failed: {e}")
+        return None
+
+
+def draw_signature(c, sig_base64, x, y, width=40*mm, height=15*mm):
+    """Draw signature from base64 string"""
+    if not sig_base64:
+        print("[DEBUG] draw_signature: No signature data")
+        return False
+    
+    print(f"[DEBUG] draw_signature: Drawing signature at x={x}, y={y}")
+    
+    temp_path = save_base64_image_to_temp(sig_base64)
+    if not temp_path or not os.path.exists(temp_path):
+        print("[DEBUG] draw_signature: Failed to create temp file")
+        return False
+    
+    try:
+        c.drawImage(temp_path, x, y, width=width, height=height, preserveAspectRatio=True, mask='auto')
+        print("[DEBUG] draw_signature: Successfully drew signature")
+        os.unlink(temp_path)
+        return True
+    except Exception as e:
+        print(f"[ERROR] draw_signature failed: {e}")
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        return False
 
 
 def _draw_header(c, W, H, inner_m):
@@ -179,8 +235,8 @@ def _draw_table_with_pagination(c, W, H, col_labels, rows, start_y, inner_m, fon
     return current_y
 
 
-def _draw_signature(c, W, H, inner_m, sig_name, sig_title, generated_by=None):
-    """Draw signature with proper spacing"""
+def _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature=None, generated_by=None):
+    """Draw signature with optional signature image"""
     hc = colors.Color(*HEADER_COLOR)
 
     sig_right = W - inner_m - 4 * mm
@@ -190,6 +246,17 @@ def _draw_signature(c, W, H, inner_m, sig_name, sig_title, generated_by=None):
     name_y = line_y + 3 * mm
     title_y = line_y - 4 * mm
     by_y = line_y + 13 * mm
+    
+    print(f"[DEBUG] _draw_signature: sig_name={sig_name}, has_signature={bool(sig_signature)}")
+    
+    # Draw signature image if available (above the name)
+    if sig_signature:
+        img_height = 12 * mm
+        img_width = 35 * mm
+        img_x = (sig_left + sig_right)/2 - img_width/2
+        img_y = name_y + 5 * mm
+        print(f"[DEBUG] Attempting to draw signature at img_x={img_x}, img_y={img_y}")
+        draw_signature(c, sig_signature, img_x, img_y, img_width, img_height)
 
     c.setFont("Helvetica", 8)
     c.setFillColor(colors.black)
@@ -222,6 +289,7 @@ def generate_report_pdf(
     status_label: str = None,
     sig_name: str = "OSCAR B. LAURENCIANA",
     sig_title: str = "OIC-CENRO",
+    sig_signature: str = None,
     use_landscape: bool = False,
     generated_by: str = None,
     period_label: str = None,
@@ -230,6 +298,9 @@ def generate_report_pdf(
     page_size = landscape(A4) if use_landscape else A4
     W, H = page_size
     inner_m = 16 * mm
+
+    print(f"[DEBUG] Generating report: {report_title}")
+    print(f"[DEBUG] Signature provided: {bool(sig_signature)}")
 
     c = rl_canvas.Canvas(file_path, pagesize=page_size)
 
@@ -272,14 +343,15 @@ def generate_report_pdf(
     final_y = _draw_table_with_pagination(c, W, H, col_labels, rows, table_start_y, inner_m, font_size)
 
     if final_y > inner_m + 35 * mm:
-        _draw_signature(c, W, H, inner_m, sig_name, sig_title, generated_by)
+        _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature, generated_by)
     else:
         # new page for signature if no space on last page
         c.showPage()
         c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, W, H, fill=1, stroke=0)
         _draw_header(c, W, H, inner_m)
-        _draw_signature(c, W, H, inner_m, sig_name, sig_title, generated_by)
+        _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature, generated_by)
 
     c.save()
+    print(f"[DEBUG] Report saved to: {file_path}")
     return file_path

@@ -3,16 +3,20 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional
 from datetime import datetime
+import json
 
 from app.core.database import get_db
 from app.core.security import staff_only, log_audit
 from app.models.user import User
 from app.models.business_record import BusinessRecord
+from app.models.setting import SystemSetting
 from app.models.inspection import Inspection, InspectionStatus
 from app.models.inspection_checklist import InspectionChecklist
 from app.schemas.inspection import InspectionChecklistCreate
 
 router = APIRouter(prefix="/inspections", tags=["Inspections"])
+
+ARCHIVED_STATUS = "ARCHIVED"
 
 VIOLATION_LABELS = {
     "littering_public":             "Littering in Public Areas",
@@ -25,6 +29,17 @@ VIOLATION_LABELS = {
     "refusal_of_inspection":        "Refusal of Inspections",
     "hazardous_without_compliance": "Use of Hazardous Substances Without Compliance",
 }
+
+
+def _is_business_line_exempted_from_inspection(db: Session, business_line: str) -> bool:
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "exempted_inspection_lines").first()
+    if not setting or not setting.value:
+        return False
+    try:
+        exempted_lines = json.loads(setting.value)
+        return business_line in exempted_lines
+    except:
+        return False
 
 
 def _derive_status(payload: dict) -> InspectionStatus:
@@ -42,7 +57,6 @@ def _active_violation_labels(violations: dict) -> list[str]:
     return [VIOLATION_LABELS.get(k, k) for k, v in violations.items() if v]
 
 
-# full checklist submission 
 @router.post("/business/{record_id}/checklist")
 def submit_inspection_checklist(
     record_id: int,
@@ -50,17 +64,21 @@ def submit_inspection_checklist(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    """Submit a full structured inspection checklist."""
     record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Business record not found")
+    
+    if _is_business_line_exempted_from_inspection(db, record.business_line):
+        raise HTTPException(
+            status_code=400,
+            detail=f"This business line '{record.business_line}' is exempted from inspections. No inspection required."
+        )
 
     payload = data.dict()
     status  = _derive_status(payload)
     active_violations  = _active_violation_labels(payload.get("violations") or {})
     violation_details  = "; ".join(active_violations) if active_violations else None
 
-    # Summary text for remarks field
     summary_text = payload.get("summary_other") if payload.get("summary") == "Other" else payload.get("summary")
 
     inspection = Inspection(
@@ -96,7 +114,6 @@ def submit_inspection_checklist(
     )
     db.add(checklist)
 
-    # Auto-update business violation flag
     if status == InspectionStatus.WITH_VIOLATION:
         record.has_violation    = True
         record.violation_date   = datetime.now().date()
@@ -128,7 +145,6 @@ def submit_inspection_checklist(
     }
 
 
-# Simple inspection (legacy) 
 @router.post("/business/{record_id}")
 def create_inspection(
     record_id: int,
@@ -141,6 +157,12 @@ def create_inspection(
     record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Business record not found")
+    
+    if _is_business_line_exempted_from_inspection(db, record.business_line):
+        raise HTTPException(
+            status_code=400,
+            detail=f"This business line '{record.business_line}' is exempted from inspections. No inspection required."
+        )
 
     inspection = Inspection(
         business_record_id=record_id,
@@ -175,7 +197,6 @@ def create_inspection(
     }
 
 
-# Get inspection history for a business
 @router.get("/business/{record_id}")
 def get_inspections(
     record_id: int,
@@ -211,7 +232,6 @@ def get_inspections(
     return result
 
 
-#checklist detail
 @router.get("/checklist/{inspection_id}")
 def get_inspection_checklist(
     inspection_id: int,
@@ -226,7 +246,6 @@ def get_inspection_checklist(
     return cl
 
 
-# Resolve violation 
 @router.post("/resolve/{inspection_id}")
 def resolve_inspection(
     inspection_id: int,
@@ -245,7 +264,6 @@ def resolve_inspection(
     inspection.resolved_by      = current_user.id
     inspection.resolved_remarks = resolved_remarks
 
-    # Clear business flag if no other open violations remain
     record = db.query(BusinessRecord).filter(
         BusinessRecord.id == inspection.business_record_id
     ).first()
@@ -269,13 +287,19 @@ def resolve_inspection(
     return {"message": "Violation resolved", "inspection_id": inspection_id}
 
 
-# all inspectiosn
 @router.get("/all")
 def get_all_inspections(
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only)
 ):
-    inspections = db.query(Inspection).order_by(desc(Inspection.inspection_date)).all()
+    inspections = (
+        db.query(Inspection)
+        .join(BusinessRecord, Inspection.business_record_id == BusinessRecord.id)
+        .filter(BusinessRecord.status != ARCHIVED_STATUS)
+        .order_by(desc(Inspection.inspection_date))
+        .all()
+    )
+    
     result = []
     for i in inspections:
         b = i.business_record
@@ -284,6 +308,7 @@ def get_all_inspections(
             "business_record_id": i.business_record_id,
             "establishment_name": b.establishment_name if b else "—",
             "bin_number": b.bin_number if b else None,
+            "business_line": b.business_line if b else None,
             "hauler_type": (b.hauler_type.value if hasattr(b.hauler_type, 'value') else str(b.hauler_type)) if b else None,
             "date": i.inspection_date.isoformat() if i.inspection_date else None,
             "status": i.status.value,
@@ -295,3 +320,99 @@ def get_all_inspections(
             "resolved_remarks": i.resolved_remarks,
         })
     return result
+
+
+@router.get("/business/{record_id}/exempted-status")
+def check_inspection_exempted(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only)
+):
+    record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Business record not found")
+    
+    is_exempted = _is_business_line_exempted_from_inspection(db, record.business_line)
+    
+    return {
+        "business_id": record_id,
+        "business_line": record.business_line,
+        "is_exempted_from_inspection": is_exempted
+    }
+    
+
+@router.get("/business/{record_id}/can-inspect")
+def can_inspect_business(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only)
+):
+    from app.models.setting import SystemSetting
+    import json
+    from datetime import datetime
+    
+    record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Business record not found")
+    
+    if _is_business_line_exempted_from_inspection(db, record.business_line):
+        return {"can_inspect": False, "reason": "exempted"}
+    
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "inspection_frequency").first()
+    freq_config = {"frequency": 1, "period": "year"}
+    if setting and setting.value:
+        try:
+            freq_config = json.loads(setting.value)
+        except:
+            pass
+    
+    frequency = freq_config.get("frequency", 1)
+    period = freq_config.get("period", "year")
+    
+    last_inspection = db.query(Inspection).filter(
+        Inspection.business_record_id == record_id
+    ).order_by(Inspection.inspection_date.desc()).first()
+    
+    if not last_inspection:
+        return {"can_inspect": True, "reason": None, "inspection_count": 0, "max_count": frequency, "period": period}
+    
+    now = datetime.utcnow()
+    last_date = last_inspection.inspection_date
+    
+    if period == "year":
+        if last_date.year == now.year:
+            count_this_year = db.query(Inspection).filter(
+                Inspection.business_record_id == record_id,
+                Inspection.inspection_date >= datetime(now.year, 1, 1)
+            ).count()
+            return {
+                "can_inspect": count_this_year < frequency,
+                "reason": None if count_this_year < frequency else f"Maximum {frequency} inspection(s) per year reached",
+                "inspection_count": count_this_year,
+                "max_count": frequency,
+                "period": period,
+                "last_inspection_date": last_date.isoformat()
+            }
+        else:
+            return {"can_inspect": True, "reason": None, "inspection_count": 0, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+    
+    elif period == "half_year":
+        from dateutil.relativedelta import relativedelta
+        if last_date + relativedelta(months=6) <= now:
+            return {"can_inspect": True, "reason": None, "inspection_count": 0, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+        else:
+            return {"can_inspect": False, "reason": f"Maximum {frequency} inspection(s) per {period} reached", "inspection_count": 1, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+    
+    elif period == "quarter":
+        from dateutil.relativedelta import relativedelta
+        if last_date + relativedelta(months=3) <= now:
+            return {"can_inspect": True, "reason": None, "inspection_count": 0, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+        else:
+            return {"can_inspect": False, "reason": f"Maximum {frequency} inspection(s) per {period} reached", "inspection_count": 1, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+    
+    else:
+        from dateutil.relativedelta import relativedelta
+        if last_date + relativedelta(months=1) <= now:
+            return {"can_inspect": True, "reason": None, "inspection_count": 0, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}
+        else:
+            return {"can_inspect": False, "reason": f"Maximum {frequency} inspection(s) per {period} reached", "inspection_count": 1, "max_count": frequency, "period": period, "last_inspection_date": last_date.isoformat()}

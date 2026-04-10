@@ -6,6 +6,9 @@ from . import audit
 from . import requirements
 from . import reports
 from . import settings
+from . import forgot_password
+from . import archive
+from . import users
 
 __all__ = [
     "admin", 
@@ -16,4 +19,7 @@ __all__ = [
     "requirements",
     "reports",
     "settings",
+    "forgot_password",
+    "archive",
+    "users",
 ]
