@@ -1,19 +1,24 @@
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.units import mm
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.pdfgen import canvas as rl_canvas
-from reportlab.platypus import Table, TableStyle
 from pathlib import Path
 from datetime import datetime
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import base64
+import tempfile
+import os
 
 UPLOAD_DIR = Path("uploads/reports")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-LOGOS_DIR       = Path("app/assets/logos")
+LOGOS_DIR = Path("app/assets/logos")
 FRONTEND_PUBLIC = Path("../frontend/public")
 
-PRIMARY      = (0.078, 0.176, 0.431)
-HEADER_COLOR = (0.11,  0.22,  0.48)
+PRIMARY = (0.078, 0.176, 0.431)
+HEADER_COLOR = (0.11, 0.22, 0.48)
 
 
 def find_asset(filename):
@@ -24,15 +29,68 @@ def find_asset(filename):
     return None
 
 
-def _draw_header(c, W, H, inner_m, b3):
+def save_base64_image_to_temp(base64_string):
+    """Save a base64 image to a temporary file and return the path"""
+    if not base64_string:
+        print("[DEBUG] save_base64_image_to_temp: No base64 string provided")
+        return None
+    
+    try:
+        # Remove data URL prefix if present
+        if ',' in base64_string:
+            base64_string = base64_string.split(',')[1]
+            print("[DEBUG] Removed data URL prefix")
+        
+        # Decode base64
+        image_data = base64.b64decode(base64_string)
+        print(f"[DEBUG] Decoded image data size: {len(image_data)} bytes")
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
+            tmp_file.write(image_data)
+            print(f"[DEBUG] Saved signature to temp file: {tmp_file.name}")
+            return tmp_file.name
+    except Exception as e:
+        print(f"[ERROR] save_base64_image_to_temp failed: {e}")
+        return None
+
+
+def draw_signature(c, sig_base64, x, y, width=40*mm, height=15*mm):
+    """Draw signature from base64 string"""
+    if not sig_base64:
+        print("[DEBUG] draw_signature: No signature data")
+        return False
+    
+    print(f"[DEBUG] draw_signature: Drawing signature at x={x}, y={y}")
+    
+    temp_path = save_base64_image_to_temp(sig_base64)
+    if not temp_path or not os.path.exists(temp_path):
+        print("[DEBUG] draw_signature: Failed to create temp file")
+        return False
+    
+    try:
+        c.drawImage(temp_path, x, y, width=width, height=height, preserveAspectRatio=True, mask='auto')
+        print("[DEBUG] draw_signature: Successfully drew signature")
+        os.unlink(temp_path)
+        return True
+    except Exception as e:
+        print(f"[ERROR] draw_signature failed: {e}")
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        return False
+
+
+def _draw_header(c, W, H, inner_m):
     bc = colors.Color(*PRIMARY)
     hc = colors.Color(*HEADER_COLOR)
 
     logo_size = 18 * mm
-    logo_gap  = 3  * mm
-    logos_w   = logo_size * 2 + logo_gap
-    logos_x   = (W - logos_w) / 2
-    logo_y    = H - inner_m - logo_size
+    logo_gap = 3 * mm
+    logos_w = logo_size * 2 + logo_gap
+    logos_x = (W - logos_w) / 2
+    logo_y = H - inner_m - logo_size
 
     tl = find_asset("tagaytay-logo.png")
     if tl:
@@ -45,8 +103,8 @@ def _draw_header(c, W, H, inner_m, b3):
                     preserveAspectRatio=True, anchor='c', mask='auto')
 
     t1_y = logo_y - 4.5 * mm
-    t2_y = t1_y   - 4.5 * mm
-    t3_y = t2_y   - 4.5 * mm
+    t2_y = t1_y - 4.5 * mm
+    t3_y = t2_y - 4.5 * mm
 
     c.setFillColor(hc)
     c.setFont("Helvetica-Bold", 9.5)
@@ -62,73 +120,143 @@ def _draw_header(c, W, H, inner_m, b3):
     return sep_y
 
 
-def _draw_table(c, W, col_labels, rows, start_y, inner_m, row_h=7*mm, font_size=8):
-    col_count  = len(col_labels)
-    table_w    = W - 2 * inner_m
+def _make_cell_style(font_size=8):
+    return ParagraphStyle(
+        'cell',
+        fontName='Helvetica',
+        fontSize=font_size,
+        leading=font_size * 1.35,
+        wordWrap='LTR',
+        splitLongWords=True,
+        alignment=TA_LEFT,
+    )
 
-    if col_count > 7:
-        col_widths = []
-        biz_idx = 0
-        base_w = table_w / col_count
-        for idx in range(col_count):
-            if idx == biz_idx:
-                col_widths.append(base_w * 1.8)
-            else:
-                remaining_w = (table_w - base_w * 1.8) / (col_count - 1)
-                col_widths.append(remaining_w)
-        total = sum(col_widths)
-        col_widths = [w * table_w / total for w in col_widths]
-    else:
-        base_w = table_w / col_count
-        biz_idx = next((i for i, l in enumerate(col_labels) if "business" in l.lower() or "name" in l.lower()), None)
-        if biz_idx is not None:
-            col_widths = [base_w] * col_count
-            extra = base_w * 0.8
-            col_widths[biz_idx] += extra
-            shrink = extra / (col_count - 1)
-            col_widths = [w - shrink if i != biz_idx else w for i, w in enumerate(col_widths)]
+
+def _make_header_style(font_size=8):
+    return ParagraphStyle(
+        'header_cell',
+        fontName='Helvetica-Bold',
+        fontSize=font_size,
+        leading=font_size * 1.35,
+        textColor=colors.white,
+        wordWrap='LTR',
+        alignment=TA_CENTER,
+    )
+
+
+def _draw_table_with_pagination(c, W, H, col_labels, rows, start_y, inner_m, font_size=8):
+    """Draw table with pagination support"""
+    table_w = W - 2 * inner_m
+    col_count = len(col_labels)
+
+    # Column width calculation
+    wide_keywords = {'business', 'name', 'establishment', 'remarks', 'resolution', 'notes', 'line'}
+    narrow_keywords = {'control', '#', 'bin', 'hauler', 'status', 'date', 'downloaded', 'inspector', 'result'}
+
+    def get_col_type(label):
+        label_lower = label.lower()
+        if any(kw in label_lower for kw in wide_keywords):
+            return 'wide'
+        elif any(kw in label_lower for kw in narrow_keywords):
+            return 'narrow'
+        return 'medium'
+
+    wide_count = sum(1 for l in col_labels if get_col_type(l) == 'wide')
+    medium_count = sum(1 for l in col_labels if get_col_type(l) == 'medium')
+    narrow_count = col_count - wide_count - medium_count
+
+    base_w = table_w / (wide_count * 2 + medium_count * 1.2 + narrow_count * 0.8)
+    col_widths = []
+    for label in col_labels:
+        ct = get_col_type(label)
+        if ct == 'wide':
+            col_widths.append(base_w * 2)
+        elif ct == 'medium':
+            col_widths.append(base_w * 1.2)
         else:
-            col_widths = [base_w] * col_count
+            col_widths.append(base_w * 0.8)
 
-    all_rows = [col_labels] + rows
-    tbl = Table(all_rows, colWidths=col_widths, rowHeights=row_h)
-    tbl.setStyle(TableStyle([
-        ('BACKGROUND',     (0, 0), (-1, 0), colors.black),
-        ('TEXTCOLOR',      (0, 0), (-1, 0), colors.white),
-        ('FONTNAME',       (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE',       (0, 0), (-1, 0), font_size),
-        ('ALIGN',          (0, 0), (-1, 0), 'CENTER'),
-        ('VALIGN',         (0, 0), (-1,-1), 'MIDDLE'),
-        ('FONTNAME',       (0, 1), (-1,-1), 'Helvetica'),
-        ('FONTSIZE',       (0, 1), (-1,-1), font_size - 0.5),
-        ('TEXTCOLOR',      (0, 1), (-1,-1), colors.black),
-        ('ALIGN',          (0, 1), (-1,-1), 'LEFT'),
-        ('ROWBACKGROUNDS', (0, 1), (-1,-1), [colors.white, colors.Color(0.95, 0.95, 0.95)]),
-        ('GRID',           (0, 0), (-1,-1), 0.5, colors.black),
-        ('LEFTPADDING',    (0, 0), (-1,-1), 3),
-        ('RIGHTPADDING',   (0, 0), (-1,-1), 3),
-        ('TOPPADDING',     (0, 0), (-1,-1), 2),
-        ('BOTTOMPADDING',  (0, 0), (-1,-1), 2),
-        ('WORDWRAP',       (0, 0), (-1,-1), True),
-    ]))
+    cell_style = _make_cell_style(font_size - 0.5)
+    header_style = _make_header_style(font_size)
 
-    tbl_h = row_h * len(all_rows)
-    tbl.wrapOn(c, table_w, tbl_h)
-    tbl.drawOn(c, inner_m, start_y - tbl_h)
-    return start_y - tbl_h
+    # Prepare all rows
+    header_row = [Paragraph(str(h), header_style) for h in col_labels]
+    data_rows = [
+        [Paragraph(str(cell) if cell else '—', cell_style) for cell in row]
+        for row in rows
+    ]
+
+    rows_per_page = int((start_y - inner_m - 45 * mm) / 7.5) 
+    rows_per_page = max(5, min(rows_per_page, 25))  
+
+    # Paginate
+    total_pages = (len(data_rows) + rows_per_page - 1) // rows_per_page
+    current_y = start_y
+
+    for page_idx in range(total_pages):
+        start_row = page_idx * rows_per_page
+        end_row = min((page_idx + 1) * rows_per_page, len(data_rows))
+        page_rows = data_rows[start_row:end_row]
+
+        all_rows = [header_row] + page_rows
+        tbl = Table(all_rows, colWidths=col_widths, repeatRows=1)
+
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.black),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.Color(0.95, 0.95, 0.95)]),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+
+        avail_h = current_y - inner_m - 35 * mm
+        tbl_w, tbl_h = tbl.wrap(table_w, avail_h)
+        tbl.drawOn(c, inner_m, current_y - tbl_h)
+        current_y = current_y - tbl_h - 5 * mm
+
+        # Page number
+        c.setFont("Helvetica", 7)
+        c.setFillColor(colors.gray)
+        c.drawCentredString(W / 2, inner_m + 5 * mm, f"Page {page_idx + 1} of {total_pages}")
+
+        # If not last page, create new page
+        if page_idx < total_pages - 1:
+            c.showPage()
+            c.setFillColorRGB(1, 1, 1)
+            c.rect(0, 0, W, H, fill=1, stroke=0)
+            current_y = _draw_header(c, W, H, inner_m) - 20 * mm
+
+    return current_y
 
 
-def _draw_signature(c, W, H, inner_m, sig_name, sig_title):
+def _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature=None, generated_by=None):
+    """Draw signature with optional signature image"""
     hc = colors.Color(*HEADER_COLOR)
 
-    sig_right = W - inner_m - 4*mm
+    sig_right = W - inner_m - 4 * mm
     sig_width = 60 * mm
-    sig_left  = sig_right - sig_width
-
-    line_y = inner_m + 22 * mm
-    name_y = line_y  +  3 * mm
-    title_y = line_y -  4 * mm
-    by_y   = line_y  + 13 * mm
+    sig_left = sig_right - sig_width
+    line_y = inner_m + 25 * mm
+    name_y = line_y + 3 * mm
+    title_y = line_y - 4 * mm
+    by_y = line_y + 13 * mm
+    
+    print(f"[DEBUG] _draw_signature: sig_name={sig_name}, has_signature={bool(sig_signature)}")
+    
+    # Draw signature image if available (above the name)
+    if sig_signature:
+        img_height = 12 * mm
+        img_width = 35 * mm
+        img_x = (sig_left + sig_right)/2 - img_width/2
+        img_y = name_y + 5 * mm
+        print(f"[DEBUG] Attempting to draw signature at img_x={img_x}, img_y={img_y}")
+        draw_signature(c, sig_signature, img_x, img_y, img_width, img_height)
 
     c.setFont("Helvetica", 8)
     c.setFillColor(colors.black)
@@ -146,6 +274,12 @@ def _draw_signature(c, W, H, inner_m, sig_name, sig_title):
     c.setFillColor(colors.black)
     c.drawCentredString((sig_left + sig_right) / 2, title_y, sig_title)
 
+    if generated_by:
+        c.setFont("Helvetica", 7.5)
+        c.setFillColor(colors.Color(0.5, 0.5, 0.5))
+        c.drawString(inner_m, inner_m + 8 * mm, f"Generated by: {generated_by}")
+        c.drawRightString(W - inner_m, inner_m + 8 * mm, f"Date: {datetime.now().strftime('%B %d, %Y %I:%M %p')}")
+
 
 def generate_report_pdf(
     report_title: str,
@@ -155,86 +289,69 @@ def generate_report_pdf(
     status_label: str = None,
     sig_name: str = "OSCAR B. LAURENCIANA",
     sig_title: str = "OIC-CENRO",
+    sig_signature: str = None,
     use_landscape: bool = False,
+    generated_by: str = None,
+    period_label: str = None,
 ) -> str:
     file_path = str(UPLOAD_DIR / filename)
     page_size = landscape(A4) if use_landscape else A4
     W, H = page_size
-
     inner_m = 16 * mm
+
+    print(f"[DEBUG] Generating report: {report_title}")
+    print(f"[DEBUG] Signature provided: {bool(sig_signature)}")
 
     c = rl_canvas.Canvas(file_path, pagesize=page_size)
 
+    # Draw first page
     c.setFillColorRGB(1, 1, 1)
     c.rect(0, 0, W, H, fill=1, stroke=0)
-
-    sep_y = _draw_header(c, W, H, inner_m, None)
+    sep_y = _draw_header(c, W, H, inner_m)
 
     hc = colors.Color(*HEADER_COLOR)
-
-    if status_label:
-        full_title = f"{report_title} — {status_label}"
-    else:
-        full_title = report_title
+    full_title = f"{report_title} — {status_label}" if status_label else report_title
 
     title_y = sep_y - 10 * mm
     c.setFillColor(hc)
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString(W / 2, title_y, full_title.upper())
 
-    meta_y = title_y - 10 * mm
+    meta_y = title_y - 6 * mm
+    if period_label:
+        c.setFont("Helvetica", 8.5)
+        c.setFillColor(colors.Color(0.3, 0.3, 0.3))
+        c.drawCentredString(W / 2, meta_y, f"Period: {period_label}")
+        meta_base = meta_y - 6 * mm
+    else:
+        meta_base = title_y - 10 * mm
+
+    # Date generated
     c.setFont("Helvetica", 7.5)
     c.setFillColor(colors.black)
     date_str = datetime.now().strftime("%B %d, %Y  %I:%M %p")
-    c.drawString(inner_m, meta_y, f"Date Generated: {date_str}")
+    c.drawString(inner_m, meta_base, f"Date Generated: {date_str}")
 
-    rule_y = meta_y - 3 * mm
+    rule_y = meta_base - 3 * mm
     c.setStrokeColor(colors.Color(*PRIMARY))
     c.setLineWidth(0.5)
     c.line(inner_m, rule_y, W - inner_m, rule_y)
 
     table_start_y = rule_y - 3 * mm
+    font_size = 7 if len(col_labels) > 7 else 8
 
-    if len(col_labels) > 7:
-        row_h, font_size = 6*mm, 7
+    final_y = _draw_table_with_pagination(c, W, H, col_labels, rows, table_start_y, inner_m, font_size)
+
+    if final_y > inner_m + 35 * mm:
+        _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature, generated_by)
     else:
-        row_h, font_size = 7*mm, 8
-
-    available_h = table_start_y - inner_m - 35*mm
-    rows_per_page = max(1, int(available_h / row_h) - 1)
-
-    page_num = 1
-    remaining = rows[:]
-
-    while True:
-        chunk = remaining[:rows_per_page]
-        remaining = remaining[rows_per_page:]
-
-        end_y = _draw_table(c, W, col_labels, chunk, table_start_y, inner_m, row_h, font_size)
-
-        c.setFont("Helvetica", 7)
-        c.setFillColor(colors.gray)
-        c.drawCentredString(W / 2, inner_m + 5*mm, f"Page {page_num}")
-
-        if not remaining:
-            _draw_signature(c, W, H, inner_m, sig_name, sig_title)
-            break
-
+        # new page for signature if no space on last page
         c.showPage()
-        page_num += 1
-
         c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, W, H, fill=1, stroke=0)
-        sep_y = _draw_header(c, W, H, inner_m, None)
-        title_y = sep_y - 7 * mm
-        c.setFillColor(colors.Color(*HEADER_COLOR))
-        c.setFont("Helvetica-Bold", 13)
-        c.drawCentredString(W / 2, title_y, full_title.upper())
-        rule_y = title_y - 8 * mm
-        c.setStrokeColor(colors.Color(*PRIMARY))
-        c.setLineWidth(0.5)
-        c.line(inner_m, rule_y, W - inner_m, rule_y)
-        table_start_y = rule_y - 3 * mm
+        _draw_header(c, W, H, inner_m)
+        _draw_signature(c, W, H, inner_m, sig_name, sig_title, sig_signature, generated_by)
 
     c.save()
+    print(f"[DEBUG] Report saved to: {file_path}")
     return file_path

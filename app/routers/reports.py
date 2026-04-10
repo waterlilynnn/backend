@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime, date
+import json
 import os
 
 from app.core.database import get_db
@@ -11,12 +12,10 @@ from app.models.user import User
 from app.models.business_record import BusinessRecord
 from app.models.clearance import Clearance
 from app.models.inspection import Inspection, InspectionStatus
+from app.models.setting import SystemSetting
 from app.utils.report_pdf_generator import generate_report_pdf
 
-router = APIRouter(
-    prefix="/reports",
-    tags=["Reports"]
-)
+router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
 def _fmt(d) -> str:
@@ -28,6 +27,34 @@ def _fmt(d) -> str:
         return datetime.fromisoformat(str(d)).strftime("%m/%d/%Y %I:%M %p")
     except Exception:
         return str(d)
+
+
+def _get_report_signatories(db: Session) -> dict:
+    """Get report signatories from settings with signature images"""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "report_signatories").first()
+    
+    print(f"[DEBUG] Retrieved setting: {setting}")
+    
+    if setting and setting.value:
+        try:
+            data = json.loads(setting.value)
+            print(f"[DEBUG] Parsed signatories data: {data}")
+            print(f"[DEBUG] certified_by_signature exists: {bool(data.get('certified_by_signature'))}")
+            print(f"[DEBUG] approved_by_signature exists: {bool(data.get('approved_by_signature'))}")
+            return data
+        except Exception as e:
+            print(f"[ERROR] Failed to parse: {e}")
+    
+    # Default fallback
+    print("[DEBUG] Using default signatories")
+    return {
+        "certified_by_name": "OSCAR B. LAURENCIANA",
+        "certified_by_title": "OIC-CENRO",
+        "certified_by_signature": None,
+        "approved_by_name": "OSCAR B. LAURENCIANA",
+        "approved_by_title": "OIC-CENRO",
+        "approved_by_signature": None,
+    }
 
 
 @router.get("/clearances/download")
@@ -63,25 +90,45 @@ def download_clearances_pdf(
             or q in (c.business_record.establishment_name if c.business_record else "").lower()
         ]
 
-    if status == "issued":
-        status_label = "Issued"
-    elif status == "pending":
-        status_label = "Pending"
-    else:
-        status_label = None
+    status_label = {"issued": "Issued", "pending": "Pending"}.get(status)
 
-    # Removed "Printed By" column - now only 5 columns
-    col_labels = ["Control #", "Business Name", "Hauler", "Last Downloaded", "Status"]
+    col_labels = ["Control No.", "Business Name", "Hauler", "Last Downloaded", "Status"]
     rows = []
     for c in clearances:
-        biz = c.business_record
+        biz  = c.business_record
+        name = biz.establishment_name if biz else "—"
+        if len(name) > 40:
+            bp = name[:40].rfind(' ')
+            if bp == -1: bp = 40
+            name = name[:bp] + "<br/>" + name[bp:].strip()
         rows.append([
             c.control_number or "—",
-            biz.establishment_name if biz else "—",
+            name,
             (biz.hauler_type.value if hasattr(biz.hauler_type, "value") else str(biz.hauler_type)) if biz else "—",
             _fmt(c.last_printed_at or c.printed_at),
             "Issued" if c.is_claimed else "Pending",
         ])
+
+    period_label = None
+    if date_from and date_to:
+        period_label = f"{date_from.strftime('%B %d, %Y')} - {date_to.strftime('%B %d, %Y')}"
+    elif date_from:
+        period_label = f"From {date_from.strftime('%B %d, %Y')}"
+    elif date_to:
+        period_label = f"Until {date_to.strftime('%B %d, %Y')}"
+
+    # Get signatories from settings
+    sigs = _get_report_signatories(db)
+    
+    # For clearances report, use approved_by
+    sig_name = sigs.get("approved_by_name", "OSCAR B. LAURENCIANA")
+    sig_title = sigs.get("approved_by_title", "OIC-CENRO")
+    sig_signature = sigs.get("approved_by_signature")
+    
+    print(f"[DEBUG] Clearances Report - Name: {sig_name}, Title: {sig_title}")
+    print(f"[DEBUG] Signature exists: {bool(sig_signature)}")
+    if sig_signature:
+        print(f"[DEBUG] Signature length: {len(sig_signature)} characters")
 
     filename = f"clearances_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     pdf_path = generate_report_pdf(
@@ -90,17 +137,22 @@ def download_clearances_pdf(
         rows=rows,
         filename=filename,
         status_label=status_label,
+        generated_by=current_user.full_name,
+        period_label=period_label,
+        sig_name=sig_name,
+        sig_title=sig_title,
+        sig_signature=sig_signature,
     )
 
     log_audit(
-        db, current_user.id, "EXPORT", "REPORT",
-        None, {
+        db, current_user.id, "EXPORT", "REPORT", None,
+        {
             "report_type": "clearances",
             "filters": {
                 "date_from": str(date_from) if date_from else None,
-                "date_to": str(date_to) if date_to else None,
-                "status": status or "all",
-                "search": search or None,
+                "date_to":   str(date_to)   if date_to   else None,
+                "status":    status or "all",
+                "search":    search or None,
             },
             "record_count": len(rows),
         }
@@ -116,18 +168,23 @@ def download_clearances_pdf(
 
 @router.get("/inspections/download")
 def download_inspections_pdf(
-    date_from:    Optional[date] = None,
-    date_to:      Optional[date] = None,
-    insp_status:  Optional[str]  = Query(None),
-    hauler:       Optional[str]  = None,
-    search:       Optional[str]  = None,
+    date_from:   Optional[date] = None,
+    date_to:     Optional[date] = None,
+    insp_status: Optional[str]  = Query(None),
+    hauler:      Optional[str]  = None,
+    search:      Optional[str]  = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(staff_only),
 ):
-    query = db.query(Inspection).options(
-        joinedload(Inspection.business_record),
-        joinedload(Inspection.inspector),
-        joinedload(Inspection.resolver),
+    query = (
+        db.query(Inspection)
+        .join(BusinessRecord, Inspection.business_record_id == BusinessRecord.id)
+        .filter(BusinessRecord.status != "ARCHIVED")
+        .options(
+            joinedload(Inspection.business_record),
+            joinedload(Inspection.inspector),
+            joinedload(Inspection.resolver),
+        )
     )
 
     if date_from:
@@ -137,15 +194,9 @@ def download_inspections_pdf(
     if insp_status == "passed":
         query = query.filter(Inspection.status == InspectionStatus.PASSED)
     elif insp_status == "unresolved":
-        query = query.filter(
-            Inspection.status == InspectionStatus.WITH_VIOLATION,
-            Inspection.is_resolved == False,
-        )
+        query = query.filter(Inspection.status == InspectionStatus.WITH_VIOLATION, Inspection.is_resolved == False)
     elif insp_status == "resolved":
-        query = query.filter(
-            Inspection.status == InspectionStatus.WITH_VIOLATION,
-            Inspection.is_resolved == True,
-        )
+        query = query.filter(Inspection.status == InspectionStatus.WITH_VIOLATION, Inspection.is_resolved == True)
 
     inspections = query.all()
 
@@ -175,14 +226,7 @@ def download_inspections_pdf(
     )
     final = unresolved + rest
 
-    if insp_status == "passed":
-        status_label = "Passed"
-    elif insp_status == "unresolved":
-        status_label = "With Violation"
-    elif insp_status == "resolved":
-        status_label = "Resolved"
-    else:
-        status_label = None
+    status_label = {"passed": "Passed", "unresolved": "With Violation", "resolved": "Resolved"}.get(insp_status)
 
     col_labels = ["Business Name", "BIN", "Hauler", "Inspector", "Date", "Result", "Remarks", "Resolved By", "Resolution Notes"]
     rows = []
@@ -202,6 +246,19 @@ def download_inspections_pdf(
             i.resolved_remarks or "—",
         ])
 
+    # Get signatories from settings
+    sigs = _get_report_signatories(db)
+    
+    # For inspections report, use certified_by
+    sig_name = sigs.get("certified_by_name", "OSCAR B. LAURENCIANA")
+    sig_title = sigs.get("certified_by_title", "OIC-CENRO")
+    sig_signature = sigs.get("certified_by_signature")
+    
+    print(f"[DEBUG] Inspections Report - Name: {sig_name}, Title: {sig_title}")
+    print(f"[DEBUG] Signature exists: {bool(sig_signature)}")
+    if sig_signature:
+        print(f"[DEBUG] Signature length: {len(sig_signature)} characters")
+
     filename = f"inspections_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     pdf_path = generate_report_pdf(
         report_title="Inspections Report",
@@ -210,18 +267,21 @@ def download_inspections_pdf(
         filename=filename,
         status_label=status_label,
         use_landscape=True,
+        sig_name=sig_name,
+        sig_title=sig_title,
+        sig_signature=sig_signature,
     )
 
     log_audit(
-        db, current_user.id, "EXPORT", "REPORT",
-        None, {
+        db, current_user.id, "EXPORT", "REPORT", None,
+        {
             "report_type": "inspections",
             "filters": {
-                "date_from": str(date_from) if date_from else None,
-                "date_to": str(date_to) if date_to else None,
-                "status": insp_status or "all",
-                "hauler": hauler or "all",
-                "search": search or None,
+                "date_from":   str(date_from)   if date_from   else None,
+                "date_to":     str(date_to)     if date_to     else None,
+                "status":      insp_status or "all",
+                "hauler":      hauler or "all",
+                "search":      search or None,
             },
             "record_count": len(rows),
         }

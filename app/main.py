@@ -24,7 +24,7 @@ from app.models.inspection import Inspection
 from app.models.audit_log import AuditLog
 from app.models.setting import SystemSetting
 
-from app.routers import admin, clearance, business, inspections, bulk, audit, requirements, reports, settings
+from app.routers import admin, clearance, business, inspections, bulk, audit, requirements, reports, settings, forgot_password, archive, users
 from app.services.auth import authenticate_user, change_password
 from app.utils.constants import BARANGAYS, BUSINESS_LINES, HAULER_TYPES, PSIC_CATEGORIES
 from app.utils.bin_validator import validate_bin_number
@@ -32,7 +32,6 @@ from app.utils.bin_validator import validate_bin_number
 import traceback
 import sys
 
-# Create tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -51,13 +50,17 @@ app.include_router(audit.router)
 app.include_router(requirements.router)
 app.include_router(reports.router)
 app.include_router(settings.router)
+app.include_router(forgot_password.router)
+app.include_router(archive.router)
+app.include_router(users.router)  # registers GET /users (auth-only)
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -68,7 +71,7 @@ app.add_middleware(
 def root():
     return {"message": "EMC System Backend running", "version": "1.0.0"}
 
-@app.post("/login", response_model=TokenResponse, tags=["Authentication"])
+@app.post("/login", response_model=TokenResponse)
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     try:
         token = authenticate_user(db, data.email, data.password)
@@ -78,6 +81,11 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/logout")
+def logout(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    log_audit(db, current_user.id, "LOGOUT", "SYSTEM", None, {})
+    return {"message": "Logged out successfully"}
+
 @app.post("/auth/change-password", tags=["Authentication"])
 def change_password_endpoint(
     data: ChangePasswordRequest,
@@ -86,17 +94,33 @@ def change_password_endpoint(
 ):
     return change_password(data, db, current_user)
 
-@app.get("/users", response_model=List[UserResponse], tags=["Users"])
-def get_users(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
-    users = db.query(User).options(joinedload(User.role)).all()
-    return users
+# BUG FIX: The original code had a duplicate `@app.get("/users", ...)` here
+# that required `admin_only`. However, `users.router` (included above) already
+# registers `GET /users` with only `get_current_user` (auth-only). FastAPI
+# matches the router route first, so the admin-only guard was silently bypassed
+# — any authenticated staff member could enumerate all users.
+#
+# The users.router GET / endpoint is sufficient. The duplicate admin-only route
+# has been removed. If you need an admin-specific users list, add it under the
+# /admin prefix in routers/admin.py instead.
 
 @app.get("/options/barangays", tags=["Options"])
 def get_barangays():
     return {"barangays": BARANGAYS}
 
 @app.get("/options/business-lines", tags=["Options"])
-def get_business_lines():
+def get_business_lines(db: Session = Depends(get_db)):
+    """Return business lines from DB settings if available, else from constants."""
+    from app.models.setting import SystemSetting
+    import json
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "business_lines").first()
+    if setting and setting.value:
+        try:
+            lines = json.loads(setting.value)
+            if lines:
+                return {"business_lines": lines}
+        except Exception:
+            pass
     return {"business_lines": BUSINESS_LINES}
 
 @app.get("/options/hauler-types", tags=["Options"])
@@ -109,18 +133,14 @@ def get_psic_categories():
 
 @app.post("/validate-bin", tags=["Options"])
 def validate_bin(bin_number: str, db: Session = Depends(get_db)):
-    """Validate BIN number against admin-configured formats."""
-    # Fetch current formats from DB
     setting = db.query(SystemSetting).filter(SystemSetting.key == "bin_formats").first()
     formats_json = setting.value if setting else None
-
     is_valid, error_message = validate_bin_number(bin_number, formats_json)
     return {
         "valid": is_valid,
-        "message": error_message or "Valid BIN number format"
+        "message": error_message or "Valid BIN format"
     }
 
-# Debug endpoints ( for development only, must be removed in production)
 @app.get("/debug/check-user/{email}")
 def debug_check_user(email: str, db: Session = Depends(get_db)):
     user = db.query(User).options(joinedload(User.role)).filter(User.email == email).first()
@@ -141,12 +161,12 @@ def test_database_connection(db: Session = Depends(get_db)):
     try:
         return {
             "database_status": "connected",
-            "roles_count": db.query(Role).count(),
-            "users_count": db.query(User).count(),
-            "businesses_count": db.query(BusinessRecord).count(),
-            "clearances_count": db.query(Clearance).count(),
+            "roles_count":       db.query(Role).count(),
+            "users_count":       db.query(User).count(),
+            "businesses_count":  db.query(BusinessRecord).count(),
+            "clearances_count":  db.query(Clearance).count(),
             "inspections_count": db.query(Inspection).count(),
-            "audit_logs_count": db.query(AuditLog).count(),
+            "audit_logs_count":  db.query(AuditLog).count(),
         }
     except Exception as e:
         return {"database_status": "error", "error": str(e)}

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
@@ -19,3 +19,9 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", foreign_keys=[user_id], back_populates="audit_logs")
+    
+    __table_args__ = (
+        Index('idx_audit_created_at', 'created_at'),
+        Index('idx_audit_user_id', 'user_id'),
+        Index('idx_audit_action', 'action'),
+    )

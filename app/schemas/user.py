@@ -11,10 +11,10 @@ class UserResponse(BaseModel):
     username: str
     full_name: str
     email: EmailStr
-    role: str
+    role: str 
     is_active: bool
     created_at: datetime
-    temporary_password: Optional[str] = None  
+    temporary_password: Optional[str] = None
 
     class Config:
         from_attributes = True

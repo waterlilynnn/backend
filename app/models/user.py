@@ -20,6 +20,7 @@ class User(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     role = relationship("Role", lazy='joined')
     creator = relationship("User", remote_side=[id])
