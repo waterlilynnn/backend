@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
@@ -52,15 +54,16 @@ app.include_router(reports.router)
 app.include_router(settings.router)
 app.include_router(forgot_password.router)
 app.include_router(archive.router)
-app.include_router(users.router)  # registers GET /users (auth-only)
+app.include_router(users.router) 
 
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174"
+        "http://localhost:3000",
+        "https://emc-frontend.onrender.com", 
+        "https://emc-api-omvf.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -93,17 +96,6 @@ def change_password_endpoint(
     current_user: User = Depends(get_current_user)
 ):
     return change_password(data, db, current_user)
-
-# BUG FIX: The original code had a duplicate `@app.get("/users", ...)` here
-# that required `admin_only`. However, `users.router` (included above) already
-# registers `GET /users` with only `get_current_user` (auth-only). FastAPI
-# matches the router route first, so the admin-only guard was silently bypassed
-# — any authenticated staff member could enumerate all users.
-#
-# The users.router GET / endpoint is sufficient. The duplicate admin-only route
-# has been removed. If you need an admin-specific users list, add it under the
-# /admin prefix in routers/admin.py instead.
-
 @app.get("/options/barangays", tags=["Options"])
 def get_barangays():
     return {"barangays": BARANGAYS}
