@@ -168,26 +168,3 @@ async def debug_exception_handler(request, exc):
     print(f"ERROR: {str(exc)}")
     traceback.print_exc(file=sys.stdout)
     return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-@app.post("/temp/reset-password", tags=["Temp"])
-def temp_reset_password(
-    email: str,
-    new_password: str,
-    db: Session = Depends(get_db)
-):
-    """TEMPORARY ENDPOINT - DELETE AFTER USE"""
-    from app.core.security import get_password_hash
-    
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        return {"error": f"User not found: {email}"}
-    
-    new_hash = get_password_hash(new_password)
-    user.hashed_password = new_hash
-    db.commit()
-    
-    return {
-        "success": True,
-        "email": email,
-        "message": f"Password reset to '{new_password}'. DELETE THIS ENDPOINT AFTER!"
-    }
