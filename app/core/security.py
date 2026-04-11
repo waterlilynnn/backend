@@ -9,16 +9,51 @@ from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.core.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__default_rounds=12,
+    bcrypt__ident="2b",  
+    bcrypt__truncate_error=False,  
+)
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 
-def get_password_hash(password: str):
+def get_password_hash(password: str) -> str:
+    """Hash password using the current best scheme."""
+    password_bytes = password.encode('utf-8')
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+        password = password_bytes.decode('utf-8', errors='ignore')
     return pwd_context.hash(password)
 
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify password with backward compatibility for older bcrypt hashes.
+    Handles $2a$, $2b$, $2y$ prefixes automatically.
+    """
+    try:
+        password_bytes = plain_password.encode('utf-8')
+        if len(password_bytes) > 72:
+            password_bytes = password_bytes[:72]
+            plain_password = password_bytes.decode('utf-8', errors='ignore')
+        
+        return pwd_context.verify(plain_password, hashed_password)
+    except (ValueError, TypeError):
+        return False
+
+
+def needs_password_rehash(hashed_password: str) -> bool:
+    """
+    Check if password hash needs to be upgraded to current scheme.
+    Use this to auto-upgrade old hashes when users log in.
+    """
+    try:
+        return pwd_context.needs_update(hashed_password)
+    except (ValueError, TypeError):
+        return True 
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -60,13 +95,12 @@ def log_audit(
     details: dict = None,
     ip_address: str = None,
 ):
-    
     log = AuditLog(
         user_id=user_id,
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
-        details=details,      
+        details=details,
         ip_address=ip_address,
     )
     db.add(log)

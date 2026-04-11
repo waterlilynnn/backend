@@ -1,7 +1,13 @@
 from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException, status
 from app.models.user import User
-from app.core.security import verify_password, get_password_hash, create_access_token, log_audit
+from app.core.security import (
+    verify_password, 
+    get_password_hash, 
+    create_access_token, 
+    log_audit,
+    needs_password_rehash
+)
 from app.schemas.auth import ChangePasswordRequest
 from datetime import datetime
 
@@ -18,21 +24,23 @@ def authenticate_user(db: Session, email: str, password: str):
     if not verify_password(password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid password",
+            detail="Invalid email or password",
         )
 
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active.",
+            detail="Account is not active. Please contact administrator.",
         )
 
     user.last_login = datetime.utcnow()
+    
+    if needs_password_rehash(user.hashed_password):
+        # Re-hash with current scheme
+        user.hashed_password = get_password_hash(password)
+    
     db.commit()
 
-    # BUG FIX: log_audit() already calls db.commit() internally.
-    # The previous code called db.commit() again after log_audit(),
-    # which caused an extra, unnecessary commit on an already-committed session.
     log_audit(
         db,
         user.id,
@@ -41,7 +49,6 @@ def authenticate_user(db: Session, email: str, password: str):
         None,
         {"email": user.email, "full_name": user.full_name, "role": user.role.name if user.role else "unknown"}
     )
-    # REMOVED: db.commit()  ← was here, now removed (log_audit already commits)
 
     token_data = {
         "sub": str(user.id),
