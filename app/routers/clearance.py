@@ -185,11 +185,9 @@ def _build_clearance_data(business: BusinessRecord, clearance: Clearance, issued
             else str(business.application_type)
         ),
         "issued_by":               issued_by,
-        # ── Signatories ──────────────────────────────────────────────────────
+        # Signatories 
         "recommending_name":       sigs.get("recommending_name",  ""),
         "recommending_title":      sigs.get("recommending_title", ""),
-        # BUG FIX: signature image data was never passed, so signatures never
-        # appeared on printed clearances even when configured in Settings.
         "recommending_signature":  sigs.get("recommending_signature"),
         "approving_name":          sigs.get("approving_name",     ""),
         "approving_title":         sigs.get("approving_title",    ""),

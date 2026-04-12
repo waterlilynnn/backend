@@ -1,14 +1,17 @@
-import smtplib
-from email.mime.text import MIMEText
-from app.core.config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+import resend
+import os
+
+resend.api_key = os.getenv("RESEND_API_KEY", "")
 
 def send_email(to_email: str, subject: str, body: str):
-    msg = MIMEText(body, "html")
-    msg["Subject"] = subject
-    msg["From"] = SMTP_USER
-    msg["To"] = to_email
+    if not resend.api_key:
+        raise RuntimeError("RESEND_API_KEY is not configured")
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, to_email, msg.as_string())
+    params = {
+        "from": "CENRO EMC System <noreply@gmail.com>",
+        "to":   [to_email],
+        "subject": subject,
+        "html": body,
+    }
+    r = resend.Emails.send(params)
+    print(f"[Email] Sent via Resend: {r}")

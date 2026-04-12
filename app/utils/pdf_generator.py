@@ -452,7 +452,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
             c.drawString(text_x, cond_y, nl)
         cond_y -= 5.5*mm
 
-    # ── Signatory section ─────────────────────────────────────────────────────
+    # Signatory section 
     cond_y -= 3*mm
     c.setFont("Helvetica", 9.5)
     c.setFillColor(text_color)
@@ -463,30 +463,11 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     right_cx = W * 0.72
     padding  = 3 * mm
 
-    # BUG FIX: The previous code set sig_y = name_y - 8*mm, which in PDF
-    # coordinate space (y increases upward) places the signature image BELOW
-    # the name text — the opposite of what's intended.
-    #
-    # Correct layout (top → bottom on page, i.e. decreasing y values):
-    #   cond_y          → "Recommending Approval:" / "Approval:" labels
-    #   cond_y - 3mm    → top of signature image box
-    #   cond_y - 15mm   → name text + underline
-    #   cond_y - 18.5mm → position/title text
-    #
-    # sig_height = 12mm, so the image occupies
-    #   y = (cond_y - 15mm) to y = (cond_y - 3mm), fitting neatly
-    #   in the gap between the label and the name.
-
     sig_width  = 35 * mm
     sig_height = 12 * mm
 
-    # Name sits 15mm below the label
     name_y = cond_y - 15 * mm
-
-    # BUG FIX: place signature so its TOP is ~3mm below the label and its
-    # BOTTOM sits ~0mm above the name baseline.
-    # In PDF coords: image bottom = name_y + 0mm, image top = name_y + sig_height
-    sig_y = name_y  # image draws from sig_y upward by sig_height mm
+    sig_y   = name_y
 
     if recommending_sig:
         draw_signature(
