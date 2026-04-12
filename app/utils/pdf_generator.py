@@ -1,3 +1,6 @@
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums  import TA_JUSTIFY, TA_CENTER
+from reportlab.platypus   import Paragraph
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
@@ -374,7 +377,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
 
     text_x = field_x
     text_w = val_end_x - text_x
-    cond_y = first_row_y - 7 * row_h - 13*mm
+    cond_y = first_row_y - 7 * row_h - 10*mm
 
     tx = text_x
     c.setFillColor(text_color)
@@ -440,7 +443,7 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     first_nw   = c.stringWidth(nlines[0], "Helvetica-Bold", 13)
     n_first    = len(nlines[0])
     notice_gap = (text_w - first_nw) / (n_first - 1) if n_first > 1 and first_nw < text_w else 0
-    c.setFillColorRGB(184, 15, 10)
+    c.setFillColor(colors.HexColor('#8B0000'))
     c.setFont("Helvetica-Bold", 13)
     for nl in nlines:
         if notice_gap > 0:
@@ -451,9 +454,15 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
         else:
             c.drawString(text_x, cond_y, nl)
         cond_y -= 5.5*mm
-
+    
+    # Note
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(colors.HexColor('#444444'))
+    c.drawCentredString(W / 2, cond_y, "Note: Please always display this clearance in a visible area at all times.")
+    cond_y -= 6*mm
+    
     # Signatory section 
-    cond_y -= 3*mm
+    cond_y -= 5*mm
     c.setFont("Helvetica", 9.5)
     c.setFillColor(text_color)
     c.drawString(W * 0.171, cond_y, "Recommending Approval:")
