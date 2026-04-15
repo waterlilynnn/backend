@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 from app.core.database import get_db
@@ -57,6 +57,49 @@ def _active_violation_labels(violations: dict) -> list[str]:
     return [VIOLATION_LABELS.get(k, k) for k, v in violations.items() if v]
 
 
+@router.get("/business/{record_id}/can-inspect")
+def can_inspect_business(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only)
+):
+    """Check if business can be inspected (one inspection per calendar year)"""
+    record = db.query(BusinessRecord).filter(BusinessRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Business record not found")
+    
+    if _is_business_line_exempted_from_inspection(db, record.business_line):
+        return {"can_inspect": False, "reason": "exempted"}
+    
+    current_year = datetime.utcnow().year
+    
+    # Check if there's an inspection in the current year
+    inspection_this_year = db.query(Inspection).filter(
+        Inspection.business_record_id == record_id,
+        Inspection.inspection_date >= datetime(current_year, 1, 1)
+    ).first()
+    
+    if inspection_this_year:
+        # If there's a violation, check if within 15 days to allow resolution
+        if inspection_this_year.status == InspectionStatus.WITH_VIOLATION and not inspection_this_year.is_resolved:
+            days_since = (datetime.utcnow() - inspection_this_year.inspection_date).days
+            if days_since <= 15:
+                return {
+                    "can_inspect": True, 
+                    "reason": "violation_resolution",
+                    "inspection_id": inspection_this_year.id,
+                    "days_remaining": 15 - days_since
+                }
+        
+        return {
+            "can_inspect": False, 
+            "reason": "already_inspected",
+            "inspection_date": inspection_this_year.inspection_date.isoformat()
+        }
+    
+    return {"can_inspect": True, "reason": None}
+
+
 @router.post("/business/{record_id}/checklist")
 def submit_inspection_checklist(
     record_id: int,
@@ -73,11 +116,33 @@ def submit_inspection_checklist(
             status_code=400,
             detail=f"This business line '{record.business_line}' is exempted from inspections. No inspection required."
         )
+    
+    current_year = datetime.utcnow().year
+    
+    # Check if already inspected this year (with violation resolution window)
+    existing_inspection = db.query(Inspection).filter(
+        Inspection.business_record_id == record_id,
+        Inspection.inspection_date >= datetime(current_year, 1, 1)
+    ).first()
+    
+    if existing_inspection:
+        if existing_inspection.status == InspectionStatus.WITH_VIOLATION and not existing_inspection.is_resolved:
+            days_since = (datetime.utcnow() - existing_inspection.inspection_date).days
+            if days_since > 15:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Violation from inspection on {existing_inspection.inspection_date.strftime('%B %d, %Y')} is over 15 days old. Please contact administrator."
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This business has already been inspected in {current_year}. Only one inspection per calendar year is allowed."
+            )
 
     payload = data.dict()
-    status  = _derive_status(payload)
-    active_violations  = _active_violation_labels(payload.get("violations") or {})
-    violation_details  = "; ".join(active_violations) if active_violations else None
+    status = _derive_status(payload)
+    active_violations = _active_violation_labels(payload.get("violations") or {})
+    violation_details = "; ".join(active_violations) if active_violations else None
 
     summary_text = payload.get("summary_other") if payload.get("summary") == "Other" else payload.get("summary")
 
@@ -143,6 +208,55 @@ def submit_inspection_checklist(
         "active_violations": active_violations,
         "business_violation_status": record.has_violation,
     }
+
+
+@router.post("/resolve/{inspection_id}")
+def resolve_inspection(
+    inspection_id: int,
+    resolved_remarks: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only)
+):
+    inspection = db.query(Inspection).filter(Inspection.id == inspection_id).first()
+    if not inspection:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+    if inspection.status != InspectionStatus.WITH_VIOLATION:
+        raise HTTPException(status_code=400, detail="No violation to resolve")
+    
+    # Check if within 15 days
+    days_since = (datetime.utcnow() - inspection.inspection_date).days
+    if days_since > 15:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resolve violation. The 15-day resolution period has passed (inspection was {days_since} days ago)."
+        )
+
+    inspection.is_resolved      = True
+    inspection.resolved_at      = datetime.now()
+    inspection.resolved_by      = current_user.id
+    inspection.resolved_remarks = resolved_remarks
+
+    record = db.query(BusinessRecord).filter(
+        BusinessRecord.id == inspection.business_record_id
+    ).first()
+    if record:
+        remaining = db.query(Inspection).filter(
+            Inspection.business_record_id == record.id,
+            Inspection.id != inspection_id,
+            Inspection.status == InspectionStatus.WITH_VIOLATION,
+            Inspection.is_resolved == False,
+        ).count()
+        if remaining == 0:
+            record.has_violation    = False
+            record.violation_status = "Resolved"
+
+    db.commit()
+
+    log_audit(db, current_user.id, "RESOLVE", "BUSINESS",
+              inspection.business_record_id,
+              {"inspection_id": inspection_id, "resolved_remarks": resolved_remarks})
+
+    return {"message": "Violation resolved", "inspection_id": inspection_id}
 
 
 @router.post("/business/{record_id}")
@@ -244,47 +358,6 @@ def get_inspection_checklist(
     if not cl:
         raise HTTPException(status_code=404, detail="Checklist not found")
     return cl
-
-
-@router.post("/resolve/{inspection_id}")
-def resolve_inspection(
-    inspection_id: int,
-    resolved_remarks: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(staff_only)
-):
-    inspection = db.query(Inspection).filter(Inspection.id == inspection_id).first()
-    if not inspection:
-        raise HTTPException(status_code=404, detail="Inspection not found")
-    if inspection.status != InspectionStatus.WITH_VIOLATION:
-        raise HTTPException(status_code=400, detail="No violation to resolve")
-
-    inspection.is_resolved      = True
-    inspection.resolved_at      = datetime.now()
-    inspection.resolved_by      = current_user.id
-    inspection.resolved_remarks = resolved_remarks
-
-    record = db.query(BusinessRecord).filter(
-        BusinessRecord.id == inspection.business_record_id
-    ).first()
-    if record:
-        remaining = db.query(Inspection).filter(
-            Inspection.business_record_id == record.id,
-            Inspection.id != inspection_id,
-            Inspection.status == InspectionStatus.WITH_VIOLATION,
-            Inspection.is_resolved == False,
-        ).count()
-        if remaining == 0:
-            record.has_violation    = False
-            record.violation_status = "Resolved"
-
-    db.commit()
-
-    log_audit(db, current_user.id, "RESOLVE", "BUSINESS",
-              inspection.business_record_id,
-              {"inspection_id": inspection_id, "resolved_remarks": resolved_remarks})
-
-    return {"message": "Violation resolved", "inspection_id": inspection_id}
 
 
 @router.get("/all")

@@ -166,6 +166,21 @@ def toggle_staff_status(
         raise HTTPException(status_code=404, detail="Staff not found")
     if staff.role.name != "staff":
         raise HTTPException(status_code=400, detail="User is not a staff member")
+    
+    staff_role = db.query(Role).filter(Role.name == "staff").first()
+    
+    # If trying to activate a staff member
+    if not staff.is_active:
+        active_count = db.query(User).filter(
+            User.role_id == staff_role.id,
+            User.is_active == True,
+        ).count()
+        
+        if active_count >= MAX_ACTIVE_STAFF:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot activate. Maximum {MAX_ACTIVE_STAFF} active staff accounts reached. Please deactivate another staff member first.",
+            )
 
     staff.is_active = not staff.is_active
     db.commit()
