@@ -24,6 +24,9 @@ PRIMARY       = (0.078, 0.176, 0.431)
 HEADER_COLOR  = (0.11,  0.22,  0.48)
 TEXT_COLOR    = (0.05,  0.12,  0.30)
 
+# Sticker cutoff: November = next year
+STICKER_CUTOFF_MONTH = 11
+
 STICKER_MAP = {
     "Barangay":    "sticker-barangay.png",
     "City":        "sticker-city.png",
@@ -43,14 +46,40 @@ def find_asset(filename):
 
 
 def get_sticker_year():
-    """Determine sticker year based on cutoff (November)."""
     now = datetime.now()
     if now.month >= 11:
         return now.year + 1
     return now.year
 
+def get_sticker_year_from_validity(valid_until_str=None):
+    """
+    Get sticker year from validity date.
+    If validity is provided and valid, use that year.
+    Otherwise fall back to cutoff logic.
+    """
+    if valid_until_str:
+        try:
+            # Try to parse the validity date
+            for fmt in ("%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+                try:
+                    valid_date = datetime.strptime(valid_until_str.strip(), fmt)
+                    return valid_date.year
+                except ValueError:
+                    continue
+        except:
+            pass
+    
+    # Fallback to cutoff logic
+    now = datetime.now()
+    if now.month >= 11:
+        return now.year + 1
+    return now.year
 
 def get_sticker_path(hauler_type, year=None):
+    """
+    Get the appropriate sticker image path.
+    If year is provided, try to find year-specific sticker first.
+    """
     if year is None:
         year = get_sticker_year()
 
@@ -61,10 +90,12 @@ def get_sticker_path(hauler_type, year=None):
     base_name = filename.replace(".png", "")
     year_filename = f"{base_name}_{year}.png"
 
+    # Try year-specific sticker first
     for d in [STICKERS_DIR, FRONTEND_PUBLIC, Path("public")]:
         p = d / year_filename
         if p.exists():
             return str(p)
+        # Fallback to base sticker
         p2 = d / filename
         if p2.exists():
             return str(p2)
@@ -134,6 +165,7 @@ def format_date(date_str: str) -> str:
 
 
 def draw_sticker_year(c, x, y, width, height, year):
+    """Draw the year text on the sticker."""
     c.saveState()
     center_x = x + (width / 2) + 6.5 * mm
     center_y = y + (height / 2) - 3 * mm
@@ -241,7 +273,8 @@ def generate_clearance_pdf(clearance_data: dict, filename: str) -> str:
     c.setLineWidth(1.5)
     c.rect(21*mm, H - 40.65*mm, 42.5*mm, 21.4*mm, fill=0, stroke=1)
 
-    current_year = get_sticker_year()
+    # Use the cutoff-aware sticker year
+    current_year = get_sticker_year_from_validity(clearance_data.get("valid_until"))
     sticker_path = get_sticker_path(clearance_data.get("hauler_type", ""), current_year)
 
     if sticker_path:

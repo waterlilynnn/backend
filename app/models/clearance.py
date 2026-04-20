@@ -38,9 +38,18 @@ class Clearance(Base):
     last_printed_at = Column(DateTime, default=datetime.utcnow)
     last_printed_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow) 
+    # ARCHIVE FIELDS (Clearances only - business records remain active)
+    is_archived = Column(Boolean, default=False)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
+    unarchived_at = Column(DateTime, nullable=True)
+    unarchived_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
     business_record = relationship("BusinessRecord", back_populates="clearances")
     printer_user = relationship("User", foreign_keys=[printed_by], back_populates="printed_clearances")
     last_printer_user = relationship("User", foreign_keys=[last_printed_by], back_populates="last_printed_clearances")
+    archiver_user = relationship("User", foreign_keys=[archived_by])
+    unarchiver_user = relationship("User", foreign_keys=[unarchived_by])

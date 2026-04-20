@@ -12,6 +12,7 @@ from app.models.role import Role
 from app.models.setting import SystemSetting
 from app.models.requirement import RequirementTemplate, RequirementSubmission
 from app.models.business_record import BusinessRecord
+from app.models.clearance import Clearance
 from app.schemas.setting import (
     SettingResponse, SettingUpdate,
     BinFormatsPayload, BinFormat,
@@ -66,7 +67,165 @@ def _gen_password(length=12):
     return "".join(secrets.choice(chars) for _ in range(length))
 
 
-#BIN FORMATS 
+# ============================================================================
+# ARCHIVE SETTINGS (CLEARANCES ONLY)
+# ============================================================================
+
+_DEFAULT_ARCHIVE = {
+    "auto_archive_enabled": False,
+    "archive_after_years": 1,  # Archive clearances after 1 year
+    "notify_before_days": 30,
+}
+
+# Sticker year cutoff: if month >= 11 (November), use next year
+STICKER_CUTOFF_MONTH = 11
+
+
+def get_sticker_year() -> int:
+    """Determine sticker year based on cutoff (November)."""
+    now = datetime.now()
+    if now.month >= STICKER_CUTOFF_MONTH:
+        return now.year + 1
+    return now.year
+
+
+@router.get("/archive")
+def get_archive_settings(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
+    return _load_setting(db, "archive_settings", _DEFAULT_ARCHIVE)
+
+
+@router.put("/archive")
+def update_archive_settings(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    current = _load_setting(db, "archive_settings", _DEFAULT_ARCHIVE)
+    current.update({k: v for k, v in payload.items() if k in _DEFAULT_ARCHIVE})
+    _save_setting(db, "archive_settings", "Archive Settings", "general", current, current_user.id)
+    log_audit(db, current_user.id, "UPDATE", "SETTING", None, {"key": "archive_settings"})
+    return {"message": "Archive settings updated", **current}
+
+
+@router.get("/archive/years")
+def get_clearance_archive_years(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
+    """
+    Get all years with clearances for archiving.
+    Only counts clearances, not business records.
+    """
+    from sqlalchemy import func, extract
+    
+    # Get years from clearances table
+    clearances_by_year = db.query(
+        extract('year', Clearance.printed_at).label('year'),
+        func.count(Clearance.id).label('count')
+    ).group_by('year').order_by('year').all()
+    
+    result = []
+    for c in clearances_by_year:
+        year = int(c.year)
+        # Check if clearances from this year are already archived
+        year_clearances = db.query(Clearance).filter(
+            extract('year', Clearance.printed_at) == year
+        ).all()
+        already_archived = all(clr.is_archived == True for clr in year_clearances) if year_clearances else False
+        
+        result.append({
+            "year": year,
+            "clearance_count": c.count,
+            "already_archived": already_archived
+        })
+    
+    # Sort by year descending
+    result.sort(key=lambda x: x['year'], reverse=True)
+    return result
+
+
+@router.post("/archive/{year}")
+def archive_clearances_by_year(
+    year: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """
+    Archive all clearances from a specific year.
+    Business records remain ACTIVE - only clearances are archived.
+    """
+    from sqlalchemy import extract
+    
+    # Only archive clearances from the specified year that are not already archived
+    clearances = db.query(Clearance).filter(
+        extract('year', Clearance.printed_at) == year,
+        Clearance.is_archived == False
+    ).all()
+    
+    count = 0
+    for clr in clearances:
+        clr.is_archived = True
+        clr.archived_at = datetime.utcnow()
+        clr.archived_by = current_user.id
+        count += 1
+    
+    db.commit()
+    
+    log_audit(
+        db, current_user.id, "ARCHIVE_CLEARANCES", "CLEARANCE", None,
+        {"year": year, "clearance_count": count}
+    )
+    
+    return {
+        "message": f"Archived {count} clearance(s) from {year}",
+        "archived_count": count,
+        "year": year
+    }
+
+
+@router.post("/unarchive/{year}")
+def unarchive_clearances_by_year(
+    year: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+):
+    """
+    Restore all archived clearances from a specific year.
+    """
+    from sqlalchemy import extract
+    
+    clearances = db.query(Clearance).filter(
+        extract('year', Clearance.printed_at) == year,
+        Clearance.is_archived == True
+    ).all()
+    
+    count = 0
+    for clr in clearances:
+        clr.is_archived = False
+        clr.unarchived_at = datetime.utcnow()
+        clr.unarchived_by = current_user.id
+        count += 1
+    
+    db.commit()
+    
+    log_audit(
+        db, current_user.id, "UNARCHIVE_CLEARANCES", "CLEARANCE", None,
+        {"year": year, "clearance_count": count}
+    )
+    
+    return {
+        "message": f"Restored {count} clearance(s) from {year}",
+        "restored_count": count,
+        "year": year
+    }
+
+
+@router.get("/sticker-year")
+def get_current_sticker_year(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
+    """Get the current sticker year based on cutoff logic."""
+    return {"sticker_year": get_sticker_year(), "cutoff_month": STICKER_CUTOFF_MONTH}
+
+
+# ============================================================================
+# BIN FORMATS
+# ============================================================================
 
 @router.get("/bin-formats/public")
 def get_bin_formats_public(db: Session = Depends(get_db)):
@@ -89,7 +248,9 @@ def update_bin_formats(payload: BinFormatsPayload, db: Session = Depends(get_db)
     return payload.formats
 
 
-#REQUIREMENTS 
+# ============================================================================
+# REQUIREMENTS
+# ============================================================================
 
 @router.get("/requirements", response_model=List[RequirementTemplateResponse])
 def list_requirement_templates(
@@ -200,7 +361,9 @@ def reorder_requirements(
     return {"message": "Order updated"}
 
 
-#BUSINESS LINES 
+# ============================================================================
+# BUSINESS LINES
+# ============================================================================
 
 @router.get("/business-lines")
 def get_business_lines(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
@@ -229,7 +392,9 @@ def update_business_lines(
     return {"message": "Business lines updated", "count": len(lines)}
 
 
-#EXEMPTED LINES (REQUIREMENTS) 
+# ============================================================================
+# EXEMPTED LINES
+# ============================================================================
 
 @router.get("/exempted-lines")
 def get_exempted_lines(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
@@ -248,8 +413,6 @@ def update_exempted_lines(
     return {"message": "Exempted lines updated", "count": len(lines)}
 
 
-#EXEMPTED LINES (INSPECTION) 
-
 @router.get("/exempted-inspection-lines")
 def get_exempted_inspection_lines(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
     return {"exempted_inspection_lines": _load_setting(db, "exempted_inspection_lines", [])}
@@ -267,7 +430,9 @@ def update_exempted_inspection_lines(
     return {"message": "Exempted inspection lines updated", "count": len(lines)}
 
 
-#SIGNATORIES 
+# ============================================================================
+# SIGNATORIES
+# ============================================================================
 
 _EMPTY_CLR_SIGS = {
     "recommending_name": "", "recommending_title": "", "recommending_signature": None,
@@ -315,7 +480,9 @@ def update_report_signatories(
     return {"message": "Report signatories updated"}
 
 
-#SIGNATURE UPLOAD 
+# ============================================================================
+# SIGNATURE UPLOAD
+# ============================================================================
 
 @router.post("/upload-signature")
 async def upload_signature(
@@ -346,114 +513,9 @@ async def upload_signature(
     return {"url": data_url, "filename": filename}
 
 
-#ARCHIVE SETTINGS 
-
-_DEFAULT_ARCHIVE = {
-    "auto_archive_enabled": False,
-    "archive_after_years": 3,
-    "archive_status": "ARCHIVED",
-    "notify_before_days": 30,
-}
-
-@router.get("/archive")
-def get_archive_settings(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
-    return _load_setting(db, "archive_settings", _DEFAULT_ARCHIVE)
-
-
-@router.put("/archive")
-def update_archive_settings(
-    payload: dict,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only),
-):
-    current = _load_setting(db, "archive_settings", _DEFAULT_ARCHIVE)
-    current.update({k: v for k, v in payload.items() if k in _DEFAULT_ARCHIVE})
-    _save_setting(db, "archive_settings", "Archive Settings", "general", current, current_user.id)
-    log_audit(db, current_user.id, "UPDATE", "SETTING", None, {"key": "archive_settings"})
-    return {"message": "Archive settings updated", **current}
-
-
-@router.get("/archive/years")
-def get_archive_years(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
-    """Get all years with business records for archiving"""
-    from sqlalchemy import func, extract
-    records = db.query(
-        extract('year', BusinessRecord.created_at).label('year'),
-        func.count(BusinessRecord.id).label('count')
-    ).group_by('year').order_by('year').all()
-    
-    result = []
-    for r in records:
-        year = int(r.year)
-        year_records = db.query(BusinessRecord).filter(
-            extract('year', BusinessRecord.created_at) == year
-        ).all()
-        already_archived = all(rec.status == "ARCHIVED" for rec in year_records)
-        result.append({
-            "year": year,
-            "record_count": r.count,
-            "already_archived": already_archived
-        })
-    return result
-
-
-@router.post("/archive/{year}")
-def archive_year(
-    year: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only),
-):
-    """Archive all business records from a specific year"""
-    from sqlalchemy import extract
-    records = db.query(BusinessRecord).filter(
-        extract('year', BusinessRecord.created_at) == year,
-        BusinessRecord.status != "ARCHIVED"
-    ).all()
-    
-    count = 0
-    for rec in records:
-        rec.status = "ARCHIVED"
-        rec.updated_at = datetime.utcnow()
-        count += 1
-    
-    db.commit()
-    
-    log_audit(
-        db, current_user.id, "ARCHIVE", "BUSINESS_RECORD", None,
-        {"year": year, "record_count": count}
-    )
-    return {"message": f"Archived {count} records from {year}", "archived_count": count}
-
-
-@router.post("/unarchive/{year}")
-def unarchive_year(
-    year: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only),
-):
-    """Restore all archived records from a specific year"""
-    from sqlalchemy import extract
-    records = db.query(BusinessRecord).filter(
-        extract('year', BusinessRecord.created_at) == year,
-        BusinessRecord.status == "ARCHIVED"
-    ).all()
-    
-    count = 0
-    for rec in records:
-        rec.status = "Approved"
-        rec.updated_at = datetime.utcnow()
-        count += 1
-    
-    db.commit()
-    
-    log_audit(
-        db, current_user.id, "UNARCHIVE", "BUSINESS_RECORD", None,
-        {"year": year, "record_count": count}
-    )
-    return {"message": f"Restored {count} records from {year}", "restored_count": count}
-
-
-#ADMIN ACCOUNT MANAGEMENT 
+# ============================================================================
+# ADMIN ACCOUNT MANAGEMENT
+# ============================================================================
 
 @router.get("/admin-account")
 def get_admin_info(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
@@ -780,7 +842,7 @@ def activate_admin_account(
             "full_name": target_admin.full_name,
         }
     }
-    
+
 
 @router.get("/inspection-frequency")
 def get_inspection_frequency(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
