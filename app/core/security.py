@@ -1,5 +1,5 @@
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -21,25 +21,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 
 def get_password_hash(password: str) -> str:
-    """Hash password using the current best scheme."""
-    password_bytes = password.encode('utf-8')
-    if len(password_bytes) > 72:
-        password_bytes = password_bytes[:72]
-        password = password_bytes.decode('utf-8', errors='ignore')
+    """Hash password using bcrypt."""
     return pwd_context.hash(password)
 
-
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify password with backward compatibility for older bcrypt hashes.
-    Handles $2a$, $2b$, $2y$ prefixes automatically.
-    """
+    """Verify password with bcrypt."""
     try:
-        password_bytes = plain_password.encode('utf-8')
-        if len(password_bytes) > 72:
-            password_bytes = password_bytes[:72]
-            plain_password = password_bytes.decode('utf-8', errors='ignore')
-        
         return pwd_context.verify(plain_password, hashed_password)
     except (ValueError, TypeError):
         return False
@@ -58,7 +45,7 @@ def needs_password_rehash(hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -68,6 +55,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    session_expired_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Your session has expired because your password was changed on another device. Please log in again.",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
@@ -82,6 +74,10 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
     if user is None or not user.is_active:
         raise credentials_exception
+
+    token_version = payload.get("tv", 0)
+    if token_version != (user.token_version or 0):
+        raise session_expired_exception
 
     return user
 

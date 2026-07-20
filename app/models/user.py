@@ -11,57 +11,72 @@ class User(Base):
     full_name = Column(String(100), nullable=False)
     email = Column(String(150), unique=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
-    
+
     is_active = Column(Boolean, default=True)
     role_id = Column(Integer, ForeignKey("tbl_roles.id"), nullable=False)
-    
+
     last_login = Column(DateTime, nullable=True)
     login_attempts = Column(Integer, default=0)
-    
+
+    token_version = Column(Integer, default=0, nullable=False)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(Integer, ForeignKey("tbl_users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     role = relationship("Role", lazy='joined')
     creator = relationship("User", remote_side=[id])
-    
-    # Track created records 
+
+    # Track created records
     created_businesses = relationship(
-        "BusinessRecord", 
+        "BusinessRecord",
         foreign_keys="BusinessRecord.created_by",
         back_populates="creator_user"
     )
-    
+
     # Track approvals
     approved_businesses = relationship(
-        "BusinessRecord", 
+        "BusinessRecord",
         foreign_keys="BusinessRecord.approved_by",
         back_populates="approver_user"
     )
-    
+
     # Track inspections
     inspections = relationship(
-        "Inspection", 
+        "Inspection",
         foreign_keys="Inspection.inspector_id",
         back_populates="inspector"
     )
-    
+
     # Track prints
     printed_clearances = relationship(
-        "Clearance", 
+        "Clearance",
         foreign_keys="Clearance.printed_by",
         back_populates="printer_user"
     )
-    
+
     last_printed_clearances = relationship(
-        "Clearance", 
+        "Clearance",
         foreign_keys="Clearance.last_printed_by",
         back_populates="last_printer_user"
     )
-    
+
+    # Track clearance archiving
+    archived_clearances = relationship(
+        "Clearance",
+        foreign_keys="Clearance.archived_by",
+        back_populates="archiver_user"
+    )
+
+    unarchived_clearances = relationship(
+        "Clearance",
+        foreign_keys="Clearance.unarchived_by",
+        back_populates="unarchiver_user"
+    )
+
     # Audit logs
     audit_logs = relationship(
-        "AuditLog", 
+        "AuditLog",
         foreign_keys="AuditLog.user_id",
         back_populates="user"
     )

@@ -31,6 +31,10 @@ def _parse_details(details_raw):
 
 def format_activity(details_raw, action, entity_type, entity_id, db):
     """Format activity into simple readable string"""
+    # Handle LOGIN/LOGOUT first — they may have empty details dict but should still get readable text
+    if action in ("LOGIN", "LOGOUT"):
+        return "Logged into the system" if action == "LOGIN" else "Logged out of the system"
+
     if not details_raw:
         return action
 
@@ -172,9 +176,6 @@ def format_activity(details_raw, action, entity_type, entity_id, db):
             report_type = details.get("report_type", "unknown").capitalize()
             return f"Downloaded {report_type} report"
 
-        elif action in ("LOGIN", "LOGOUT"):
-            return "Logged into the system" if action == "LOGIN" else "Logged out of the system"
-
         elif action == "MANUAL_ARCHIVE":
             archived_count = details.get("archived_count", 0)
             return f"Manually archived {archived_count} record(s)"
@@ -243,7 +244,6 @@ def get_audit_logs(
             "user_role": log.user.role.name if log.user and log.user.role else "System",
             "activity": format_activity(log.details, log.action, log.entity_type, log.entity_id, db),
             "timestamp": log.created_at,
-            # ✅ Expose these so frontend can do client-side category filtering
             "action": log.action,
             "entity_type": log.entity_type,
         })

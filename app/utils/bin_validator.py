@@ -2,7 +2,7 @@ import re
 import json
 from typing import Tuple, Optional
 
-# fallback formats if DB not available
+# if DB not available
 _FALLBACK_FORMATS = [
     {"segments": [7, 4, 7],    "is_active": True},
     {"segments": [3, 2, 4, 7], "is_active": True},
@@ -39,7 +39,6 @@ def validate_bin_number(
         if re.match(pattern, value):
             return True, None
 
-    # human-readable examples from active formats
     examples = []
     for fmt in active_formats:
         examples.append("-".join(["0" * s for s in fmt["segments"]]))

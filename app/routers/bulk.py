@@ -267,7 +267,7 @@ async def bulk_upload(
                     validity=validity or datetime(datetime.now().year, 12, 31).date(),
                     sticker_color=sticker_color,
                     created_by=current_user.id,
-                    previous_record_id=existing.id if existing and app_type == "RENEWAL" else None
+                    previous_record_id=existing.id if existing and app_type == ApplicationType.RENEWAL else None
                 )
                 
                 db.add(business)

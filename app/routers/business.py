@@ -6,7 +6,7 @@ from datetime import datetime, date
 from app.core.database import get_db
 from app.core.security import staff_only, admin_only, log_audit
 from app.models.user import User
-from app.models.business_record import BusinessRecord, HaulerType
+from app.models.business_record import BusinessRecord, HaulerType, ApplicationType
 from app.models.setting import SystemSetting
 from app.schemas.business import (
     BusinessCreate, BusinessUpdate, BusinessResponse,
@@ -90,7 +90,7 @@ def create_business_record(
         ).first()
 
     control_number = generate_control_number(db, data.application_type, existing)
-    previous_record_id = existing.id if existing and data.application_type == "RENEWAL" else None
+    previous_record_id=existing.id if existing and data.application_type == ApplicationType.RENEWAL else None
 
     business = BusinessRecord(
         bin_number=data.bin_number,

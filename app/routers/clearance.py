@@ -15,12 +15,10 @@ from app.models.clearance import Clearance
 from app.models.inspection import Inspection, InspectionStatus
 from app.models.requirement import RequirementTemplate, RequirementSubmission
 from app.models.setting import SystemSetting
-from app.utils.pdf_generator import generate_clearance_pdf
+from app.utils.pdf_generator import generate_clearance_pdf, get_sticker_year
+from app.utils.email import send_email
 
-router = APIRouter(
-    prefix="/clearance",
-    tags=["Clearance"]
-)
+router = APIRouter(prefix="/clearance", tags=["Clearance"])
 
 ARCHIVED_STATUS = "ARCHIVED"
 
@@ -49,7 +47,6 @@ def _get_signatories(db: Session) -> dict:
     if setting and setting.value:
         try:
             data = json.loads(setting.value)
-            # Merge with defaults so missing keys still have values
             return {**defaults, **data}
         except Exception:
             pass
@@ -185,7 +182,6 @@ def _build_clearance_data(business: BusinessRecord, clearance: Clearance, issued
             else str(business.application_type)
         ),
         "issued_by":               issued_by,
-        # Signatories 
         "recommending_name":       sigs.get("recommending_name",  ""),
         "recommending_title":      sigs.get("recommending_title", ""),
         "recommending_signature":  sigs.get("recommending_signature"),
@@ -270,12 +266,19 @@ def generate_clearance(
             detail=f"Cannot generate clearance: Missing required documents — {missing_str}{suffix}",
         )
 
-    existing = db.query(Clearance).filter(Clearance.business_record_id == business_id).first()
-    if existing:
+    existing_active = (
+        db.query(Clearance)
+        .filter(
+            Clearance.business_record_id == business_id,
+            Clearance.is_archived == False,
+        )
+        .first()
+    )
+    if existing_active:
         return {
             "message":        "Clearance already exists",
-            "clearance_id":   existing.id,
-            "control_number": existing.control_number,
+            "clearance_id":   existing_active.id,
+            "control_number": existing_active.control_number,
         }
 
     if not business.control_number:
@@ -307,11 +310,13 @@ def generate_clearance(
     )
     color = color_map.get(hauler_str, "White")
 
+    sticker_year = get_sticker_year()
+
     clearance = Clearance(
         business_record_id=business_id,
         control_number=business.control_number,
         clearance_color=color,
-        valid_until=datetime(datetime.now().year, 12, 31, 23, 59, 59),
+        valid_until=datetime(sticker_year, 12, 31, 23, 59, 59),
         printed_by=current_user.id,
         printed_at=datetime.now(),
         is_active=True,
@@ -326,6 +331,40 @@ def generate_clearance(
         db, current_user.id, "GENERATE", "CLEARANCE",
         clearance.id, {"control_number": clearance.control_number},
     )
+
+    if business.email:
+        send_email(
+            to_email=business.email,
+            subject="EMC System — Your Environmental Clearance Is Ready for Pickup",
+            body=f"""
+            <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+              <h2 style="color:#1a4a2e;">EMC System — Clearance Ready for Pickup</h2>
+              <p>Dear <strong>{_format_owner(business)}</strong>,</p>
+              <p>Your Environmental Management Clearance for
+                 <strong>{business.establishment_name}</strong> has been
+                 <strong>approved and is now ready for pickup</strong>.</p>
+              <table style="border-collapse:collapse;width:100%;margin:16px 0;
+                            background:#f0fdf4;border:1px solid #dcfce7;">
+                <tr>
+                  <td style="padding:12px;font-weight:bold;color:#166534;">Control Number</td>
+                  <td style="padding:12px;font-family:monospace;">{clearance.control_number}</td>
+                </tr>
+                <tr style="background:#f8fafc;">
+                  <td style="padding:12px;font-weight:bold;color:#166534;">Establishment</td>
+                  <td style="padding:12px;">{business.establishment_name}</td>
+                </tr>
+              </table>
+              <p style="color:#166534;font-size:13px;">
+                Please proceed to the CENRO office to claim your clearance.
+                Bring a valid ID upon claiming.
+              </p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+              <p style="color:#999;font-size:12px;">
+                City Environment and Natural Resources Office · Tagaytay City
+              </p>
+            </div>
+            """,
+        )
 
     return {
         "message":         "Clearance generated successfully",
@@ -355,6 +394,42 @@ def issue_clearance(
         db, current_user.id, "ISSUE", "CLEARANCE",
         clearance.id, {"control_number": clearance.control_number},
     )
+
+    biz = clearance.business_record
+    if biz and biz.email:
+        send_email(
+            to_email=biz.email,
+            subject="EMC System — Your Environmental Clearance Has Been Issued",
+            body=f"""
+            <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+              <h2 style="color:#1a4a2e;">EMC System — Clearance Officially Issued</h2>
+              <p>Dear <strong>{_format_owner(biz)}</strong>,</p>
+              <p>Your Environmental Management Clearance for
+                 <strong>{biz.establishment_name}</strong> has been
+                 <strong>officially issued</strong> on
+                 {clearance.claimed_at.strftime("%B %d, %Y")}.</p>
+              <table style="border-collapse:collapse;width:100%;margin:16px 0;
+                            background:#f0fdf4;border:1px solid #dcfce7;">
+                <tr>
+                  <td style="padding:12px;font-weight:bold;color:#166534;">Control Number</td>
+                  <td style="padding:12px;font-family:monospace;">{clearance.control_number}</td>
+                </tr>
+                <tr style="background:#f8fafc;">
+                  <td style="padding:12px;font-weight:bold;color:#166534;">Issued By</td>
+                  <td style="padding:12px;">{clearance.claimed_by}</td>
+                </tr>
+              </table>
+              <p style="color:#166534;font-size:13px;">
+                Please keep your clearance in a safe place. This is an official government document.
+              </p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+              <p style="color:#999;font-size:12px;">
+                City Environment and Natural Resources Office · Tagaytay City
+              </p>
+            </div>
+            """,
+        )
+
     return {"message": "Clearance marked as issued", "clearance_id": clearance.id}
 
 
@@ -383,6 +458,7 @@ def get_clearance(
         "print_count":        clearance.print_count,
         "printed_at":         clearance.printed_at,
         "is_claimed":         clearance.is_claimed,
+        "is_archived":        clearance.is_archived,
         "business_name":      business.establishment_name,
         "owner_name":         _format_owner(business),
         "location":           business.location,
@@ -423,9 +499,9 @@ def view_clearance_pdf(
 
     return FileResponse(
         path=pdf_path,
-        filename=f"EMC_CLEARANCE_{clearance.control_number}.pdf",
+        filename=f"{clearance.control_number}.pdf",
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=EMC_CLEARANCE_{clearance.control_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename={clearance.control_number}.pdf"},
     )
 
 
@@ -462,10 +538,45 @@ def print_clearance(
 
     return FileResponse(
         path=pdf_path,
-        filename=f"EMC_CLEARANCE_{clearance.control_number}.pdf",
+        filename=f"{clearance.control_number}.pdf",
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=EMC_CLEARANCE_{clearance.control_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename={clearance.control_number}.pdf"},
     )
+
+
+@router.get("/business/{business_id}/history")
+def get_business_clearance_history(
+    business_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(staff_only),
+):
+    clearances = (
+        db.query(Clearance)
+        .options(
+            joinedload(Clearance.printer_user),
+            joinedload(Clearance.last_printer_user),
+        )
+        .filter(Clearance.business_record_id == business_id)
+        .order_by(Clearance.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id":             c.id,
+            "control_number": c.control_number,
+            "clearance_color": c.clearance_color,
+            "valid_until":    c.valid_until.isoformat() if c.valid_until else None,
+            "printed_at":     c.printed_at.isoformat() if c.printed_at else None,
+            "last_printed_at": c.last_printed_at.isoformat() if c.last_printed_at else None,
+            "print_count":    c.print_count,
+            "is_claimed":     c.is_claimed,
+            "is_archived":    c.is_archived,
+            "archived_at":    c.archived_at.isoformat() if c.archived_at else None,
+            "printed_by":     c.printer_user.full_name if c.printer_user else "Unknown",
+        }
+        for c in clearances
+    ]
 
 
 @router.get("/history/all")
@@ -518,6 +629,8 @@ def get_clearance_history(
             "last_printed_at":  c.last_printed_at.isoformat() if c.last_printed_at else None,
             "print_count":      c.print_count,
             "is_claimed":       c.is_claimed,
+            "is_archived":      c.is_archived,
+            "archived_at":      c.archived_at.isoformat() if c.archived_at else None,
             "has_violation":    b.has_violation if b else False,
         })
 

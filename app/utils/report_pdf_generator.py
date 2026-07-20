@@ -96,9 +96,9 @@ def _draw_header(c, W, H, inner_m):
     if tl:
         c.drawImage(tl, logos_x, logo_y, width=logo_size, height=logo_size,
                     preserveAspectRatio=True, anchor='c', mask='auto')
-    bp = find_asset("bp-logo.png")
-    if bp:
-        c.drawImage(bp, logos_x + logo_size + logo_gap, logo_y,
+    cenro = find_asset("cenro-logo.png")
+    if cenro:
+        c.drawImage(cenro, logos_x + logo_size + logo_gap, logo_y,
                     width=logo_size, height=logo_size,
                     preserveAspectRatio=True, anchor='c', mask='auto')
 

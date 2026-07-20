@@ -1,5 +1,5 @@
 from .user import StaffCreate, UserResponse, LoginRequest, TokenResponse
-from .auth import ChangePasswordRequest
+from .auth import ChangePasswordRequest, ChangePasswordResponse
 from .business import (
     BusinessCreate, BusinessUpdate, BusinessResponse,
     BusinessSearchResponse, BusinessListResponse
@@ -17,6 +17,7 @@ __all__ = [
     "LoginRequest",
     "TokenResponse",
     "ChangePasswordRequest",
+    "ChangePasswordResponse",
     "BusinessCreate",
     "BusinessUpdate",
     "BusinessResponse",

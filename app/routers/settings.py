@@ -67,13 +67,11 @@ def _gen_password(length=12):
     return "".join(secrets.choice(chars) for _ in range(length))
 
 
-# ============================================================================
-# ARCHIVE SETTINGS (CLEARANCES ONLY)
-# ============================================================================
 
+# ARCHIVE SETTINGS (CLEARANCES ONLY)
 _DEFAULT_ARCHIVE = {
     "auto_archive_enabled": False,
-    "archive_after_years": 1,  # Archive clearances after 1 year
+    "archive_after_years": 1,
     "notify_before_days": 30,
 }
 
@@ -223,10 +221,8 @@ def get_current_sticker_year(db: Session = Depends(get_db), current_user: User =
     return {"sticker_year": get_sticker_year(), "cutoff_month": STICKER_CUTOFF_MONTH}
 
 
-# ============================================================================
-# BIN FORMATS
-# ============================================================================
 
+# BIN FORMATS
 @router.get("/bin-formats/public")
 def get_bin_formats_public(db: Session = Depends(get_db)):
     setting = _get_or_create_setting(db, "bin_formats", json.dumps(DEFAULT_BIN_FORMATS), "BIN Number Formats", "validation")
@@ -248,10 +244,8 @@ def update_bin_formats(payload: BinFormatsPayload, db: Session = Depends(get_db)
     return payload.formats
 
 
-# ============================================================================
-# REQUIREMENTS
-# ============================================================================
 
+# REQUIREMENTS
 @router.get("/requirements", response_model=List[RequirementTemplateResponse])
 def list_requirement_templates(
     include_inactive: bool = False,
@@ -361,10 +355,8 @@ def reorder_requirements(
     return {"message": "Order updated"}
 
 
-# ============================================================================
-# BUSINESS LINES
-# ============================================================================
 
+# BUSINESS LINES
 @router.get("/business-lines")
 def get_business_lines(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
     setting = db.query(SystemSetting).filter(SystemSetting.key == "business_lines").first()
@@ -392,10 +384,8 @@ def update_business_lines(
     return {"message": "Business lines updated", "count": len(lines)}
 
 
-# ============================================================================
-# EXEMPTED LINES
-# ============================================================================
 
+# EXEMPTED LINES
 @router.get("/exempted-lines")
 def get_exempted_lines(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
     return {"exempted_lines": _load_setting(db, "exempted_business_lines", [])}
@@ -430,10 +420,8 @@ def update_exempted_inspection_lines(
     return {"message": "Exempted inspection lines updated", "count": len(lines)}
 
 
-# ============================================================================
-# SIGNATORIES
-# ============================================================================
 
+# SIGNATORIES
 _EMPTY_CLR_SIGS = {
     "recommending_name": "", "recommending_title": "", "recommending_signature": None,
     "approving_name": "", "approving_title": "", "approving_signature": None,
@@ -480,10 +468,8 @@ def update_report_signatories(
     return {"message": "Report signatories updated"}
 
 
-# ============================================================================
-# SIGNATURE UPLOAD
-# ============================================================================
 
+# SIGNATURE UPLOAD
 @router.post("/upload-signature")
 async def upload_signature(
     file: UploadFile = File(...),
@@ -513,10 +499,8 @@ async def upload_signature(
     return {"url": data_url, "filename": filename}
 
 
-# ============================================================================
-# ADMIN ACCOUNT MANAGEMENT
-# ============================================================================
 
+# ADMIN ACCOUNT MANAGEMENT
 @router.get("/admin-account")
 def get_admin_info(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
     """Return current active admin's basic info (no password)."""
@@ -599,11 +583,10 @@ def create_new_admin(
 ):
     """
     Create a new admin account OR restore an existing deactivated admin account.
-    
     If an account with the given email already exists (even if deactivated),
     it will be reactivated instead of creating a new one.
     """
-    email = (payload.get("email") or "").strip().lower()
+    email     = (payload.get("email")     or "").strip().lower()
     full_name = (payload.get("full_name") or "").strip()
 
     if not email:
@@ -621,11 +604,11 @@ def create_new_admin(
         User.role_id == admin_role.id
     ).first()
 
-    is_restore = existing_admin is not None
-    generated_pw = _gen_password(8)
+    is_restore      = existing_admin is not None
+    generated_pw    = _gen_password(8)
     hashed_password = get_password_hash(generated_pw)
 
-    # Get current active admin
+    # Get current active admin before making changes
     old_admin = db.query(User).filter(
         User.role_id == admin_role.id,
         User.is_active == True,
@@ -633,22 +616,22 @@ def create_new_admin(
 
     if is_restore:
         # RESTORE existing admin account
-        existing_admin.is_active = True
-        existing_admin.hashed_password = hashed_password
-        existing_admin.full_name = full_name
-        existing_admin.updated_at = datetime.utcnow()
+        existing_admin.is_active        = True
+        existing_admin.hashed_password  = hashed_password
+        existing_admin.full_name        = full_name
+        existing_admin.updated_at       = datetime.utcnow()
         db.add(existing_admin)
         db.flush()
         new_admin = existing_admin
     else:
         # CREATE new admin account
-        username = email.split('@')[0]
+        username      = email.split('@')[0]
         base_username = username
-        counter = 1
+        counter       = 1
         while db.query(User).filter(User.username == username).first():
             username = f"{base_username}{counter}"
             counter += 1
-        
+
         new_admin = User(
             username=username,
             email=email,
@@ -662,48 +645,75 @@ def create_new_admin(
         db.add(new_admin)
         db.flush()
 
-    # Deactivate previous admin(s) - but NOT if it's the same account being restored
+    # Deactivate all other active admins
     if old_admin and old_admin.id != new_admin.id:
         db.query(User).filter(
-            User.role_id == admin_role.id,
+            User.role_id   == admin_role.id,
             User.is_active == True,
-            User.id != new_admin.id,
+            User.id        != new_admin.id,
         ).update({"is_active": False}, synchronize_session=False)
 
     db.commit()
 
-    # Send email notifications
-    email_sent = False
-    email_error = None
-    old_admin_notified = False
+    # Email 1: Notify the NEW admin with credentials 
+    action_text = "restored" if is_restore else "created"
 
-    # 1. Email the new/restored admin with credentials
-    try:
-        action_text = "restored" if is_restore else "created"
-        send_email(
-            to_email=email,
-            subject=f"EMC System — Admin Account {action_text.upper()}",
+    email_sent = send_email(
+        to_email=email,
+        subject=f"EMC System — Admin Account {action_text.upper()}",
+        body=f"""
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+          <h2 style="color:#1a4a2e;">EMC System — Admin Account {action_text.capitalize()}</h2>
+          <p>Hello <strong>{full_name}</strong>,</p>
+          <p>Your administrator account has been {action_text} in the
+             Environmental Management Clearance System.</p>
+          <table style="border-collapse:collapse;width:100%;margin:16px 0;
+                        background:#f0fdf4;border:1px solid #dcfce7;">
+            <tr>
+              <td style="padding:12px;font-weight:bold;">Email</td>
+              <td style="padding:12px;">{email}</td>
+            </tr>
+            <tr style="background:#fff3e0;">
+              <td style="padding:12px;font-weight:bold;">Temporary Password</td>
+              <td style="padding:12px;font-family:monospace;
+                         font-size:16px;letter-spacing:2px;">{generated_pw}</td>
+            </tr>
+          </table>
+          <p style="color:#dc2626;font-size:13px;">
+            <strong>Important:</strong> Please change your password immediately
+            after your first login.
+          </p>
+          <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+          <p style="color:#999;font-size:12px;">
+            City Environment and Natural Resources Office · Tagaytay City
+          </p>
+        </div>
+        """,
+    )
+    
+    # Email 2: Notify the OLD admin that access was revoked 
+    old_admin_notified = False
+    if old_admin and old_admin.id != new_admin.id and old_admin.email:
+        old_admin_notified = send_email(
+            to_email=old_admin.email,
+            subject="EMC System — Admin Access Transferred",
             body=f"""
             <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
-              <h2 style="color:#1a4a2e;">EMC System — Admin Account {action_text.capitalize()}</h2>
-              <p>Hello <strong>{full_name}</strong>,</p>
-              <p>Your administrator account has been {action_text} in the
-                 Environmental Management Clearance System.</p>
-              <table style="border-collapse:collapse;width:100%;margin:16px 0;
-                            background:#f0fdf4;border:1px solid #dcfce7;">
-                  <tr>
-                  <td style="padding:12px;font-weight:bold;">Email</td>
-                  <td style="padding:12px;">{email}</td>
-                  </tr>
-                <tr style="background:#fff3e0;">
-                  <td style="padding:12px;font-weight:bold;">Temporary Password</td>
-                  <td style="padding:12px;font-family:monospace;
-                             font-size:16px;letter-spacing:2px;">{generated_pw}</td>
-                  </tr>
-                </table>
-              <p style="color:#dc2626;font-size:13px;">
-                <strong>Important:</strong> Please change your password immediately
-                after your first login.
+              <h2 style="color:#7f1d1d;">EMC System — Your Admin Access Has Been Revoked</h2>
+              <p>Hello <strong>{old_admin.full_name}</strong>,</p>
+              <p>This is to inform you that your administrator access to the
+                 <strong>Environmental Management Clearance System</strong> has been
+                 transferred to another account.</p>
+              <div style="background:#fef2f2;border:1px solid #fecaca;
+                          border-radius:8px;padding:16px;margin:16px 0;">
+                <p style="margin:0;color:#991b1b;font-size:14px;">
+                  <strong>Your account is now deactivated.</strong><br>
+                  New admin email: <strong>{email}</strong>
+                </p>
+              </div>
+              <p style="color:#666;font-size:13px;">
+                If you did not authorise this change, please contact the
+                CENRO office immediately.
               </p>
               <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
               <p style="color:#999;font-size:12px;">
@@ -712,73 +722,40 @@ def create_new_admin(
             </div>
             """,
         )
-        email_sent = True
-    except Exception as e:
-        email_error = str(e)
 
-    # 2. Email the previous admin to notify them access has been revoked (if different)
-    if old_admin and old_admin.id != new_admin.id and old_admin.email:
-        try:
-            send_email(
-                to_email=old_admin.email,
-                subject="EMC System — Admin Access Transferred",
-                body=f"""
-                <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
-                  <h2 style="color:#7f1d1d;">EMC System — Your Admin Access Has Been Revoked</h2>
-                  <p>Hello <strong>{old_admin.full_name}</strong>,</p>
-                  <p>This is to inform you that your administrator access to the
-                     <strong>Environmental Management Clearance System</strong> has been
-                     transferred to another account.</p>
-                  <div style="background:#fef2f2;border:1px solid #fecaca;
-                              border-radius:8px;padding:16px;margin:16px 0;">
-                    <p style="margin:0;color:#991b1b;font-size:14px;">
-                      <strong>Your account is now deactivated.</strong><br>
-                      New admin email: <strong>{email}</strong>
-                    </p>
-                  </div>
-                  <p style="color:#666;font-size:13px;">
-                    If you did not authorise this change, please contact the
-                    CENRO office immediately.
-                  </p>
-                  <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
-                  <p style="color:#999;font-size:12px;">
-                    City Environment and Natural Resources Office · Tagaytay City
-                  </p>
-                </div>
-                """,
-            )
-            old_admin_notified = True
-        except Exception as e:
-            pass
-
-    # Log audit
+    # Audit log 
     log_audit(
-        db, current_user.id, "CREATE" if not is_restore else "RESTORE", "ADMIN_ACCOUNT", new_admin.id,
+        db, current_user.id,
+        "CREATE" if not is_restore else "RESTORE",
+        "ADMIN_ACCOUNT",
+        new_admin.id,
         {
-            "action": "restored" if is_restore else "created",
-            "email": email,
+            "action":               "restored" if is_restore else "created",
+            "email":                email,
             "deactivated_previous": bool(old_admin and old_admin.id != new_admin.id),
-            "old_admin_email": old_admin.email if old_admin and old_admin.id != new_admin.id else None,
-            "old_admin_notified": old_admin_notified,
+            "old_admin_email":      old_admin.email if old_admin and old_admin.id != new_admin.id else None,
+            "old_admin_notified":   old_admin_notified,
             "new_admin_email_sent": email_sent,
         },
     )
 
+    # Response 
     response_data = {
-        "message": f"Admin account {'restored' if is_restore else 'created'} for {email}.",
-        "email": email,
-        "full_name": full_name,
-        "email_sent": email_sent,
+        "message":           f"Admin account {'restored' if is_restore else 'created'} for {email}.",
+        "email":             email,
+        "full_name":         full_name,
+        "email_sent":        email_sent,
         "old_admin_notified": old_admin_notified,
-        "is_restore": is_restore,
+        "is_restore":        is_restore,
     }
 
     if not email_sent:
+        # Email failed — surface the temporary password in the response
+        # so the admin can copy and share it manually
         response_data["temporary_password"] = generated_pw
-        response_data["email_error"] = email_error
         response_data["warning"] = (
-            "Email delivery failed. Please copy the temporary password below "
-            "and provide it to the admin manually."
+            "Email delivery failed. Please copy the temporary password "
+            "and provide it to the new admin manually."
         )
 
     return response_data
